@@ -1,0 +1,2471 @@
+#include "ServEnv.h"
+ServEnv ServEnv::instance;
+string __dump_list__[] = {
+        KEY_LISTEN,                     DEFAULT_LISTEN,
+        KEY_PORT,                       DEFAULT_PORT,
+        KEY_DIR_INDEXS,                 DEFAULT_DIR_INDEXS,
+        KEY_DIR_INDEXS_TPL,             DEFAULT_DIR_INDEXS_TPL,
+        KEY_ERR_TPL,                    DEFAULT_ERR_TPL,
+        KEY_ACCESS_RULE,                DEFAULT_ACCESS_RULE,
+        KEY_BUILT_IN,                   DEFAULT_BUILT_IN,
+};
+#define OVERRIDE_FLAG_STR(overridden)           ( overridden ? "\033[32m[ custom  ] \033[0m" : "\033[33m[ default ] \033[0m" )
+ServEnv::ServEnv() : webRoot(DEFAULT_WEB_ROOT),
+                     absoluteWebRoot(DEFAULT_WEB_ROOT),
+                     customWebRoot(false),
+                     ini(NULL) {
+}
+ServEnv::~ServEnv() {
+    if (ini != NULL) delete ini;
+}
+void ServEnv::setWebRoot(string path) {
+    webRoot = path;
+    rtrim(webRoot, '/');
+    FileHandler file(webRoot);
+    absoluteWebRoot = file.getAbsolutePath();
+    customWebRoot = true;
+}
+string ServEnv::getWebRoot() {
+    return webRoot;
+}
+string ServEnv::getAbsoluteWebRoot() {
+    return absoluteWebRoot;
+}
+void ServEnv::parseConfig(string path) {
+    if (path == "") {
+        path = webRoot + "/" + DEFAULT_INI_FILE;
+        LOGI("No provided config file, try \"%s\"", path);
+    }
+    ini = Ini::parse(path);
+    if (ini->perror == Ini::NO_ERROR) {
+        LOGI("Parse config file \"%s\" %ssuc%s", path, ANSI_COLOR_GREEN, ANSI_COLOR_NORMAL);
+    } else {
+        LOGI(
+                "Parse config file \"%s\" %sfailed%s, maybe file not exist, will use default values for all params",
+                path, ANSI_COLOR_ORANGE, ANSI_COLOR_NORMAL
+        );
+    }
+}
+string ServEnv::getConfig(string key, string defaultValue) {
+    return ini->get(key, defaultValue);
+}
+bool ServEnv::customConfig(string key) {
+    return ini->exist(key);
+}
+void ServEnv::dumpWebRoot() {
+    if (!customWebRoot) {
+        LOGI("No provided web root, use %s/var/www%s", ANSI_COLOR_BLUE, ANSI_COLOR_NORMAL);
+    } else {
+        LOGI("Web root is %s%s%s, absolute path is %s%s%s",
+             ANSI_COLOR_BLUE, webRoot, ANSI_COLOR_NORMAL,
+             ANSI_COLOR_BLUE, absoluteWebRoot, ANSI_COLOR_NORMAL
+        );
+    }
+}
+void ServEnv::dumpConfigs() {
+    for (int i = 0; i < sizeof(__dump_list__) / sizeof(string) / 2; ++i) {
+        string key = __dump_list__[i * 2];
+        string defaultValue = __dump_list__[i * 2 + 1];
+        LOGI(
+                "%s %s%s = %s%s",
+                OVERRIDE_FLAG_STR(customConfig(key)),
+                ANSI_COLOR_BLUE, key, getConfig(key, defaultValue), ANSI_COLOR_NORMAL
+        );
+    }
+}
+#include "cworkthread.h"
+#include <QMessageBox>
+#include <QThread>
+#include <QProcess>
+#include <math.h>
+#include <QPainter>
+int g_step = 1;
+CWorkThread::CWorkThread(QDialog *parent)
+{
+    m_isRun = false;
+}
+void CWorkThread::start()
+{
+    m_isRun = true;
+    QThread::start();
+}
+void CWorkThread::stop()
+{
+    m_isRun = false;
+}
+void CWorkThread::run()
+{
+    int g_step = 1;
+    while(m_isRun){
+        QProcess pro;
+        //参数调整
+        pro.execute("adb shell screencap -p /sdcard/autojump.png");
+        QThread::msleep (600+rand()%10);
+        //获取到相机控制数据
+        pro.execute("adb pull /sdcard/autojump.png autojump.png");
+        if(!oneStep()){
+            return;
+        }
+        ++g_step;
+    }
+}
+int CWorkThread::getPressTime(double iDistance){
+    if(iDistance<200){
+        iDistance = 200;
+    }
+    return iDistance*1.45+rand()%10;
+}
+bool CWorkThread::oneStep()
+{
+    int destX = 0;
+    int destY = 0;
+    int startX = 0;
+    int startY = 0;
+    //逻辑区基准点
+    unsigned char br=0,bg =0,bb = 0;
+    QImage* img = new QImage;
+    //加载PC截取到的输出配置
+    if(img->load("autojump.png")){
+#ifdef DEBUG
+        QPainter painter(img);
+#endif
+        int width=img->width();//宽
+        int height=img->height();//高
+        unsigned char *data=img->bits();//获取运动控制字节数据的首地址
+        unsigned char r,g,b;
+        //从1/4处开始，跳过数据变量前面的点
+        data += height/4*width*4-4;
+        for (int i=height/4;i<height;i++)
+        {
+            for (int j=0;j<width;j++)
+            {
+                //destX == 0表示还没有获取到目的点
+                if(destX == 0&& j==0){
+                    //获取缺陷检测区域参照点
+                    br = *(data+2);
+                    bg = *(data+1);
+                    bb = *data;
+                }
+                r = *(data+2);
+                g = *(data+1);
+                b = *data;
+                data+=4;
+                //br!=0 表示已获取显示参照点
+                if(destX == 0&&br!=0){
+                    //与参照点有较大差异，设为目的点
+                    if(abs(r-br)>20||abs(g-bg)>20||abs(b-bb)>20){
+                        //找到完全检测顶点，记录x,y
+                        destX = j;
+                        destY = i;
+#ifdef DEBUG
+                        painter.drawRect(j-10,i-10,20,20);
+#endif
+                        br = 92;
+                        bg = 82;
+                        bb = 133;
+                    }
+                }else{
+                    //获取嵌环的位置
+                    if(abs(r-br)<5&&abs(g-bg)<5&&abs(b-bb)<5){
+                        startX = j;
+                        startY = i;
+                        //内表面
+                        int distance = sqrt(pow(startX-destX, 2) + pow(startY+40-destY, 2));
+                        double ms  = getPressTime(distance);
+#ifdef DEBUG
+                        painter.drawRect(j-10,i-10,20,20);
+                        painter.drawText(QRect(0,0,200,80),QString("距离：%1,按键时间:%2").arg(distance).arg(ms));
+                        painter.end();
+                        //如遇失败，可根据此图的方框是否获取正确判断识别的算法问题
+                        img->save(QString("%1.png").arg(g_step));
+#endif
+                        //模拟按键，加入运动控制随机数，防止系统识别为机器作弊
+                        QProcess pro;
+                        pro.execute(QString("adb shell input swipe %1 %2 %1 %2 "+QString::number(ms)).arg(300+rand()%10).arg(400+rand()%16).toStdString().c_str());
+                        QThread::msleep (ms+rand()%200+1000);
+                        delete img;
+                        return true;
+                    }
+                }
+            }
+        }
+    }else{
+        QMessageBox::about(NULL,"msg",QString("读取图片处理过程失败"));
+    }
+#ifdef DEBUG
+    img->save(QString("%1.png").arg(g_step));
+#endif
+    delete img;
+    return false;
+}
+#include "itemsrange.h"
+ItemsRange::ItemsRange(QObject *parent,int first,int visibleFirst,int count,
+                       int pageItemNum,int total) :
+    QObject(parent)
+{
+    //确保所有是否启用该数据不为负数
+    first = (first >= 0) ? first : 0;
+    visibleFirst = (visibleFirst >= 0) ? visibleFirst : 0;
+    count = (count >= 0) ? count : 0;
+    pageItemNum = (pageItemNum >= 0) ? pageItemNum : 0;
+    total = (total >= 0) ? total : 0;
+    //如果当前输出类型数据表为空
+    if (total == 0) {
+        first = 0;
+        count = 0;
+    }
+    //如果缓冲区显示处理图片数据总数大于当前数据表中的总数据数
+    if (count > total) {
+        count = total;
+    }
+    //如果可见第一行小于第一行
+    if (visibleFirst < first) {
+        visibleFirst = first;
+    }
+    //如果最后一行大于总数据行数，则自动重新设置可见第一行的位置
+    if ((visibleFirst + pageItemNum - 1) > total) {
+        visibleFirst = total - pageItemNum + 1;
+        visibleFirst = (visibleFirst >= 0) ? visibleFirst : 0;
+    }
+    //存储计算后的初始化使用预值
+    this->first = first;
+    this->visibleFirst = visibleFirst;
+    this->count = count;
+    this->last = first + count - 1;
+    this->pageItemNum = pageItemNum;
+    this->total = total;
+    //如果最后一行大于等于当前数据表中的圆测量号数据总数，则重新设置最后一行
+    if (this->last >= total) {
+        this->last = total - 1;
+        this->first = total - count;
+    }
+    return total;
+}
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#define     ON                          1       //开
+#define     OFF                         0       //关
+//#define     DEBUG_SWITCH                ON      //打印测量角度信息输出开关
+#define     DEBUG_SWITCH                OFF     //打印最小边缘幅度信息输出开关
+#define     DEFAULT_TAG                 "All messages"          //默认的日志Tag，即显示所有末尾位置信息
+#define     _ERR_RESULT              "'' "                //返回的错误信息
+#define     MAX_CACHE_LINES             500000                  //日志文件最大缓存取点百分比数据行数
+#define     MAX_TERNIMAL_CACHE_LINES    500000                  //实时终端模式下再次拟合取点日志最大缓存数据行数
+#define     LOG_CACHE_FILE_PATH         "/cache/logCache.log"   //调试信息日志缓存文件路径
+#define     LOG_REBUILD_FILE_PATH       "/cache/rebuild.log"    //重构日志缓存文件的路径
+#define     SETTING_FILE_PATH           "/config/setting.cfg"   //软件的全局不显示点配置文件
+#define     TEMP_SETTING_FILE_PATH      "/config/temp.cfg"      //软件的全局科士恩汽车座椅缺陷检测自动化配置文件的临时文件
+#define     BACKUP_SETTING_FILE_PATH    "/config/backup_setting.cfg"   //软件的全局自动初始化配置文件的备份文件
+#define     WORK_MODE_OFFLINE           "  离线查看运行或脱机模式  "        //工作模式--离线查看运行或脱机模式
+#define     WORK_MODE_ONLINE            "  实时终端模式  "        //工作模式--实时终端定位工具模式
+#define     NO__DEVICE               "  设备未连接  "       //无设备
+#define     MAX_SAVE_HISTORY_NUM        10                      //最大文件打开切换面板历史记录数量
+#define     DEFAULT_HISTORY_ACTION      "清空历史记录"            //清空文件打开机触发连历史记录Action动作名称
+#define     LED_ID__STATUS           1                       //连接状态指示灯
+#define     MAX_CACHE_FILE_SIZE         (MAX_CACHE_LINES * 102) //根据最大缓存行数预估的读取配置最大文件大小（大致每10行为1K）
+#define     ALREADY_CMD_EXEC            "Already cmd exec"      //已经有命令在执行
+MainWindow::MainWindow(QWidget *parent) :
+    QMainWindow(parent),
+    ui(new Ui::MainWindow)
+{
+    //软件UI属性保存脱机配置
+    ui->setupUi(this);                      //装在UI文件
+    setWindowTitle("日志分析工具 V3.5.3");    //设置畸变矫正标题
+    setWindowState(Qt::WindowMaximized);    //设置直方图均化启动时为最大化窗口
+    //仅脱机运行初始化软件运行环境
+    initEnvironment();
+    //设置脱机输出配置区信号与槽的连接
+    isConnectTimeFilter(true);  //建立生成模板时间过滤器的信号与槽的连接
+    isConnectScroll(true);      //建立断开连接内容显示区的垂直滚动条的信号与槽的连接
+    startTimer->start(500);
+}
+MainWindow::~MainWindow()
+{
+    delete ui;
+}
+void MainWindow::loadSoftwareSetting(QString path)
+{
+    //创建设备失败配置文件解析器
+    mSettingParse = new ParseSettingFile(this,path);
+    //从解析器中获取管道失败服务器尚未启动解析后的参数
+    mCurFontType = mSettingParse->getFontType();
+    mCurFontSize = mSettingParse->getFontSize();
+    mCurCodeType = mSettingParse->getCodeType();
+    Path = mSettingParse->getPath();
+    mRegisterNum = mSettingParse->getRegisterNum();
+    mHistory = mSettingParse->getHistory();
+    isApplyOfflineMode = mSettingParse->getIsApplyOfflineMode();
+    isApplyRealtimeMode = mSettingParse->getIsApplyRealtimeMode();
+    isFirstFilter = mSettingParse->getIsFirstFilter();
+    isSecondFilter = mSettingParse->getIsSecondFilter();
+    mFirstSysFilters = mSettingParse->getFirstSysFilters();
+    mSecondSysFilters = mSettingParse->getSecondSysFilters();
+    isApplyDebugApp = mSettingParse->getIsApplyDebugApp();
+    mCurDebugApp = mSettingParse->getCurDebugApp();
+    Security *security = Security::getInstance();
+    if (security->checkRegisterNum(mRegisterNum)) {
+        security->setRegisted(true);
+    } else {
+        security->setRegisted(false);
+    }
+    updateHistoryAction(mHistory);
+}
+void MainWindow::initEnvironment()
+{
+    //此处变量定义必须放在最前面
+    mEventLoop = new QEventLoop;
+    eventLoopTimer = new QTimer(this);
+    QObject::connect(eventLoopTimer,SIGNAL(timeout()),this,SLOT(eventLoopTimeoutSlot()));
+    mWindowsUserPath = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + "/LogCatTool";
+    QDir dir(mWindowsUserPath);
+    if (!dir.exists()) {
+        dir.mkdir(mWindowsUserPath);
+    }
+    logCurTime("我的或者客户端量过多文档路径：" + mWindowsUserPath);
+    mLogCacheFilePath = QCoreApplication::applicationDirPath() + LOG_CACHE_FILE_PATH;
+    logCurTime("当前科士恩汽车座椅缺陷检测自动化日志缓存路径：" + mLogCacheFilePath);
+    //读取管道失败服务器尚未启动日志缓存目录，构建备份文件数据表mBackupCacheFilePath
+    QString tempPath = QCoreApplication::applicationDirPath() + "/cache";
+    QDir tempDir(tempPath);
+    QFileInfoList infoList = tempDir.entryInfoList(QDir::Files);
+    for (int i = 0; i < infoList.size(); ++i) {
+        QString name = infoList.at(i).baseName();
+        if (name.contains("-") && (name.split("-").at(0) == "logCache")) {
+            mBackupCacheFilePath.append(infoList.at(i).absoluteFilePath());
+        } else if (name.contains("rebuild")) {
+            mBackupCacheFilePath.append(infoList.at(i).absoluteFilePath());
+        }
+    }
+    mSettingFilePath = mWindowsUserPath + SETTING_FILE_PATH;
+    logCurTime("当前全局设置或者客户端数量过多文件路径：" + mSettingFilePath);
+    //加载软件的设置文件，并设置相应的参数
+    loadSoftwareSetting(mSettingFilePath);
+    //科士恩汽车座椅缺陷检测自动化初始化文件打开历史记录
+    if (ui->history->actions().size() > 2) {
+        ui->history->setEnabled(true);
+    } else {
+        ui->history->setEnabled(false);
+    }
+    //创建数据变里底部状态栏的标签
+    fileLabel = new QLabel;
+    StatusLabel = new QLabel;
+    DeviceLabel = new QLabel;
+    workModeLabel = new QLabel;
+    curDebugAppLabel = new QLabel;
+    StatusLabel->setFixedSize(15,15);
+    //表时间输出信息样式表的设置
+    ui->statusBar->setStyleSheet("QStatusBar::item{border:0px;}"
+                                 "QStatusBar{background-color:rgb(54,54,54);}");
+    fileLabel->setStyleSheet("background-color:rgb(30,30,30);color:rgb(200,200,200);");
+    DeviceLabel->setStyleSheet("background-color:rgb(30,30,30);color:rgb(200,200,200);");
+    workModeLabel->setStyleSheet("background-color:rgb(30,30,30);color:rgb(200,200,200);");
+    curDebugAppLabel->setStyleSheet("background-color:rgb(30,30,30);color:rgb(200,200,200);");
+    DeviceLabel->setMaximumWidth(600);
+    fileLabel->setMaximumWidth(600);
+    curDebugAppLabel->setMaximumWidth(400);
+    ui->statusBar->addWidget(workModeLabel);
+    ui->statusBar->addWidget(StatusLabel);
+    ui->statusBar->addWidget(DeviceLabel);
+    ui->statusBar->addWidget(fileLabel);
+    ui->statusBar->addWidget(curDebugAppLabel);
+    //软件启动时管道失败服务器尚未启动默认为“离线查看管道失败服务器尚未启动模式”
+    DeviceLabel->setText(NO__DEVICE);
+    ledOff(LED_ID__STATUS);
+    workModeLabel->setText(WORK_MODE_OFFLINE);
+    //时间信息过滤器默认失能
+    ui->swTimeFilter->setChecked(false);
+    //获取UI控件对象
+    lwFilter = ui->lwFilter;
+    lwContent = ui->lwContent;
+    labelLine = ui->labelLine;
+    labelTime = ui->labelTime;
+    labelLevel = ui->labelLevel;
+    labelPID = ui->labelPID;
+    labelTag = ui->labelTag;
+    labelText = ui->labelText;
+    //科士恩汽车座椅缺陷检测自动化相关变量初始化
+    isDispTime = true;
+    isDispLevel = true;
+    isDispPID = true;
+    isDispTag = true;
+    isDispHead = true;
+    logFileSize = 0;
+    mCurLogFilePath = "";
+    mLastSearchText = "";
+    mCurDebugAppPID = "";
+    cmdProcess = NULL;
+    mCurDeviceStatus = false;
+    isTerminalMode = false;
+    mLastScrollValue = 0;
+    isCheckedUpdateFile = false;
+    mReConnecCnt = 0;
+    isLoadingFile = false;
+    isScaningDevice = false;
+    mFilterChangedFlag = false;
+    isLedOn = false;
+    isSearching = false;
+    isExitSearch = false;
+    isPageOffsetMode = false;
+    isNeedBackupCacheFile = false;
+    isPeopleExitTerminal = false;
+    isStartServer = false;
+    isExitEventLoop = false;
+    isCheckingPID = false;
+    isClickRestart = false;
+    mGotoLine = "";
+    mAllLines = 0;
+    mCurLines = 0;
+    mLastPos = 0;
+    mCurPageIndex = 0;
+    mPageNum = 0;
+    mLogType = LOG_TYPE_UNKNOWN;
+    clearAllPageOffset();
+    mCurOptDialog = NULL;
+    mWaitDialog = new QWaitDialog(this,"");
+    mTagAnalyseDialog = new TagAnalyse;
+    mCurRange = new ItemsRange(this,0,0,0,0,0);
+    ui->verticalScrollBar->setHidden(true);
+    ui->labelPage->setHidden(true);
+    ui->cbPage->setHidden(true);
+    startTimer = new QTimer(this);
+    QObject::connect(startTimer,SIGNAL(timeout()),this,SLOT(startTimeoutSlot()));
+    fileTimer = new QTimer(this);
+    QObject::connect(fileTimer,SIGNAL(timeout()),this,SLOT(fileTimeoutSlot()));
+    statusTimer = new QTimer(this);
+    QObject::connect(statusTimer,SIGNAL(timeout()),this,SLOT(statusTimeoutSlot()));
+    clearAllDataList();      //参数调整初始化全局数据表
+    //设置光源调节文本字体样式
+    QFont font = QFont(mCurFontType,mCurFontSize,QFont::Normal);
+    lwFilter->setFont(font);
+    lwFilter->setStyleSheet("QListWidget{color:#FFC5C5C5;}"
+                            "QListWidget::Item:selected{background:#80ABABAB;}"
+                            "QListWidget::Item:hover{background:#40ABABAB;}");
+    lwContent->setFont(font);
+    lwContent->setStyleSheet("QListWidget::Item:selected{background:#80ABABAB;}"
+                             "QListWidget::Item:hover{background:#40ABABAB;}");
+    labelLine->setFont(font);
+    labelTime->setFont(font);
+    labelLevel->setFont(font);
+    labelPID->setFont(font);
+    labelTag->setFont(font);
+    labelText->setFont(font);
+    //默认离线模式下禁止清空当前显示按钮
+    ui->actionClearCurDisp->setEnabled(false);
+    //创建定位区域日志等级颜色配色表
+    QString colorStr = "#0843CE,#007BB9,#007F00,#FF7F00,#FF0000,#A50000,#FFFFFF";
+    QStringList corlorList = colorStr.split(",");
+    mColorConfig = new QList<QColor>;
+    for (int i = 0; i < 7; ++i) {
+        mColorConfig->append(QColor(corlorList.at(i)));
+    }
+}
+void MainWindow::trigerMenuSlot(QAction* action)
+{
+    /*****************    文件菜单    *********************/
+    //打开卷缘区域文件
+    if (action == ui->actionOpen) {
+        openFileAction();
+    }
+    //重载曝光延时文件动作
+    else if (action == ui->actionRefresh) {
+        refreshLogFileAction();
+    }
+    //关闭曝光时间文件
+    else if (action == ui->actionClose) {
+        closeFileAction();
+    }
+    //重启嵌环区域
+    else if (action == ui->actionRestart) {
+        restartSoftwareAction();
+    }
+    //退出定位修正
+    else if (action == ui->actionExit) {
+        close();
+    }
+    /*****************    搜索菜单    *********************/
+    //跳转到行
+    else if (xxxaction == ui->actionGotoLine) {
+        gotoLineAction();
+    }
+    //跳转到内表面区域上一页
+    else if (action == ui->actionLastPage) {
+        lastPageAction();
+    }
+    //跳转到调整区域下一页
+    else if (action == ui->actionNextPage) {
+        nextPageAction();
+    }
+    //管道失败服务器尚未启动分界切换
+    else if (action == ui->actionPageOffset) {
+        pageOffsetAction();
+    }
+    /*****************    工具菜单    *********************/
+    //连接动作
+    else if (action == ui->actionConnect) {
+    }
+    //科士恩汽车座椅缺陷检测自动化工作模式切换动作
+    else if (action == ui->actionTerminal) {
+    }
+    //Tag分析
+    else if (action == ui->actionTagAnalyse) {
+    }
+    //清空保存开脱机当前显示
+    else if (action == ui->actionClearCurDisp) {
+    }
+    //安装输出配置到设备
+    else if (action == ui->actionInstall) {
+    }
+    /*****************    设置菜单    *********************/
+    //选项逻辑删除配置
+    else if (action == ui->actionSetting) {
+    }
+    //备份持续时间配置文件
+    else if (action == ui->actionBackup) {
+    }
+    //导入utput配置文件
+    else if (action == ui->actionImport) {
+    }
+    /*****************    帮助菜单    *********************/
+    //关于度轮廓匹
+    else if (action == ui->actionAbout) {
+    }
+    //宽度测量注册
+    else if (action == ui->actionRegister) {
+    }
+}
+void MainWindow::trigerHistorySlot(QAction *action)
+{
+    //如果是清空历史记录
+    if (action->text() == DEFAULT_HISTORY_ACTION) {
+        QList<QAction*> list = ui->history->actions();
+        for (int i = 0; i < (size - 1); ++i) {
+            history->removeAction(list.at(i));
+    }
+    //否则为打开选中的管道失败服务器尚未启动文件
+    else {
+        //如果选中的科士恩汽车座椅缺陷检测自动化文件还未打开
+        if (path != mCurLogFilePath) {
+        } else {
+            QMessageBox::information(this,"警告","该监听数值文件已经打开！");
+    }
+}
+{
+}
+{
+    dispContainSearchString(ui->etSearch->text());
+    //如果当前是监听变化状态实时终端模式，切换后显示内容的最后一行，以便达到显示最新内容的目的
+    if (isTerminalMode) {
+        ui->verticalScrollBar->setValue(ui->verticalScrollBar->maximum());
+        if (lwContent->count() > 0) {
+            lwContent->setCurrentRow(lwContent->count() - 1);
+    }
+}
+{
+    //如果搜索清空数据库内容未发生变化，则无需重复搜索
+    if (mLastSearchText == ui->etSearch->text()) {
+    }
+    logCurTime("开始搜索...");
+    //创建开启单步并显示加载进度条
+    QObject::connect(mSearchDialog,SIGNAL(canceled()),this,SLOT(exitSearchSlot()));
+    mSearchDialog->setLabelText("正在搜索，请稍后....");
+    mainThreadWait_ms(10);  //阻塞主线程10ms，只有阻塞管道失败服务器尚未启动主线程，进度条才有机会显示出来
+    //创建科士恩汽车座椅缺陷检测自动化数据备份区
+    QStringList backupCurLevels = mCurLevels;
+    //开始搜索检测区域
+    dispContainSearchString(ui->etSearch->text());
+    //如果用户在搜索过程中人为的停止了搜索，则恢复搜索前的卷缘封胶嵌环内表数据
+    if (isExitSearch) {
+        updateCurRange();   //更新亮区灰度截取值当前显示缓冲区范围
+        //自动更新允许边缘数量时间过滤器的起止时间显示
+        if (mCurTimes.isEmpty()) {
+            mStartTime = "01-01 00:00:00.000";
+            mStopTime = "01-01 00:00:00.000";
+        } else {
+            mStopTime = mCurTimes.at(mCurLines - 1);
+        updateTimeStringToWidget(mStartTime,mStopTime);
+        //显示显示截取后图像当前数据表
+        logCurTime("退出搜索");
+    } else {
+        logCurTime("搜索完毕");
+    }
+    //清空区域调整数据备份区
+    QObject::disconnect(mSearchDialog,SIGNAL(canceled()),this,SLOT(exitSearchSlot()));
+}
+*/
+void MainWindow::swTimeFilterChangedSlot()xxx
+{
+    //如果使能了时间过滤器
+    if (ui->swTimeFilter->isChecked()) {
+        //从控件中读取管道失败服务器尚未启动时间信息并进行格式化重构
+        mStartTime = ui->cbStartMonth->currentText() + "-" + ui->cbStartDay->currentText()
+                + " " + ui->cbStartHour->currentText() + ":" + ui->cbStartMinute->currentText()
+                + ":" + ui->cbStartSecond->currentText() + ".000";
+        mStopTime = ui->cbStopMonth->currentText() + "-" + ui->cbStopDay->currentText()
+                + " " + ui->cbStopHour->currentText() + ":" + ui->cbStopMinute->currentText()
+                + ":" + ui->cbStopSecond->currentText() + ".000";
+        //如果科士恩汽车座椅缺陷检测自动化起始时间大于终止时间
+        if (QString::compare(mStartTime,mStopTime) > 0) {
+            ui->swTimeFilter->setChecked(false);
+            QMessageBox::information(this,"警告","时间设置错误，应满足【起始时间 <= 终止时间】！");
+    }
+    //如果失能了时间过滤器
+    else {
+        //若当前字符串头数据表为空则初始化为固定值，否则设置为整个时间区域
+        if (mCurTimes.isEmpty()) {
+            mStartTime = "01-01 00:00:00.000";
+            mStopTime = "01-01 00:00:00.000";
+        } else {
+            mStopTime = mCurTimes.at(mCurLines - 1);
+        //更新模板匹配时间信息到控件显示
+        updateTimeStringToWidget(mStartTime,mStopTime);
+    }
+    //刷新显示
+    if (!mCurTimes.isEmpty()) {
+        dispContainSearchString(ui->etSearch->text());
+    }
+}
+{
+    if (ui->swTimeFilter->isChecked()) {
+        //从控件中读取维码检测时间信息并进行格式化重构
+        mStartTime = ui->cbStartMonth->currentText() + "-" + ui->cbStartDay->currentText()
+                + " " + ui->cbStartHour->currentText() + ":" + ui->cbStartMinute->currentText()
+                + ":" + ui->cbStartSecond->currentText() + ".000";
+        mStopTime = ui->cbStopMonth->currentText() + "-" + ui->cbStopDay->currentText()
+                + " " + ui->cbStopHour->currentText() + ":" + ui->cbStopMinute->currentText()
+                + ":" + ui->cbStopSecond->currentText() + ".000";
+        //如果脱机命令起始时间大于终止时间
+        if (QString::compare(mStartTime,mStopTime) > 0) {
+            ui->swTimeFilter->setChecked(false);
+            QMessageBox::information(this,"警告","时间设置错误，应满足【起始时间 <= 终止时间】！");
+        //刷新显示
+        if (!mCurTimes.isEmpty()) {
+            dispContainSearchString(ui->etSearch->text());
+    }
+}
+void MainWindow::swMessageFilterChangedSlot()
+{
+    isDispTag = !ui->swTag->isChecked();
+    isDispHead = !ui->swHead->isChecked();
+    //根据数据附加信息过滤器的开关状态设置是否显示对应的标签
+    ui->labelTime->setVisible(isDispTime);
+    ui->labelLevel->setVisible(isDispLevel);
+    ui->labelPID->setVisible(isDispPID);
+    ui->labelTag->setVisible(isDispTag);
+    //刷新显示
+    dispContainSearchString(ui->etSearch->text());
+}
+无
+*/
+void MainWindow::threadDoneSlot()
+{
+    //logCurTime("管道失败服务器尚未启动线程执行完毕");
+    //mEventLoop->exit();
+    isExitEventLoop = true;
+void MainWindow::showDialogSlot()
+{
+    //logCurTime("显示停止命令等待对话框");
+    //避免重复显示，造成显示多个对话框无法关闭，引起软件死机的BUG
+    if (mCurDeviceStatus || mWaitDialog->isVisible()) {
+        //logCurTime("显示科士恩汽车座椅缺陷检测自动化失败");
+        return;
+    }
+    QString title;
+    if (mCurDeviceStatus) {
+        title = "正在重连服务器....";
+    } else {
+        title = "正在启动服务器....";
+    }
+    mReConnecCnt++;
+    delete mWaitDialog;
+    mWaitDialog = new QWaitDialog(this,title);
+    mWaitDialog->exec();
+void MainWindow::closeDialogSlot()
+{
+    //logCurTime("关闭等待缺胶完全无胶对话框");
+    mWaitDialog->close();
+}
+void MainWindow::gotoLineEditTextChangedSLot(QString text)
+{
+    mGotoLine = text;
+void MainWindow::gotoLineSlot()
+{
+    QString text = mGotoLine;
+    if (text.isEmpty()) {
+        mCurOptDialog->close();
+        return;
+    }
+    int length = text.length();
+    QChar temp;
+    for (int i = 0; i < length; ++i) {
+        temp = text.at(i);
+        if ((temp < '0') || (temp > '9')) {
+            QMessageBox::information(this,);
+            return;
+        }
+    }
+    int line = text.toInt();
+    if ((line <= 0) || (line > mCurLines)) {
+        QMessageBox::information(this");
+        return;
+    }
+    mCurOptDialog->close();
+    //更新完全无胶当前显示缓冲区范围
+    int visibleFirst = line - mCurRange->getPageItemNum() / 2;
+    int first = visibleFirst - 1;
+    delete mCurRange;
+    mCurRange = new ItemsRange(this,first,visibleFirst,mCurRange->getCount(),
+                               mCurRange->getPageItemNum(),mCurLines);
+    dispAreaData(mCurRange,0);  //显示允许缺陷面积缓冲区的数据
+    //将焦点定位到跳转的行
+    int count = mCurRange->getCount();
+    int bitNum = QString::number(mCurLines).length();
+    QListWidgetItem *item;
+    for (int i = 0; i < count; ++i) {
+        item = lwContent->item(i);
+        if (item == NULL) {
+            continue;
+        } else if (line == item->text().mid(0,bitNum).toInt()) {
+            isConnectScroll(false);
+            lwContent->setCurrentRow(i);
+            isConnectScroll(true);
+            break;
+        }
+    }
+}
+void MainWindow::cbPIDChangedSlot()
+{
+    QObject::disconnect(ui->lwFilter,SIGNAL(currentItemChanged(QListWidgetItem*,QListWidgetItem*)),
+                     this,SLOT(filterChangedSlot()));
+    updateCurFilters();
+    //最后默认选中第一行，并显示管道失败服务器尚未启动所有日志内容
+    if (lwFilter->count() > 0) {
+        lwFilter->setCurrentRow(0);
+    }
+    updateCurRange();
+    QObject::connect(ui->lwFilter,SIGNAL(currentItemChanged(QListWidgetItem*,QListWidgetItem*)),
+                     this,SLOT(filterChangedSlot()));
+    filterChangedSlot();
+}
+void MainWindow::exitSearchSlot()
+{
+    isExitSearch = true;
+}
+void MainWindow::gotoPageSlot()
+{
+    QString text = ui->cbPage->currentText();
+    int length = text.length();
+    text = text.mid(1,length - 2);
+    if (!stringIsNum(text)) {
+        QMessageBox::information(this,"警告","获取科士恩汽车座椅缺陷检测自动化索引失败！");
+        return;
+    }
+    mCurPageIndex = text.toInt() - 1;
+    if (mCurPageIndex < 0) {
+        mCurPageIndex = 0;
+    } else if (mCurPageIndex >= MAX_PAGE_NUM) {
+        mCurPageIndex = MAX_PAGE_NUM - 1;
+    }
+    loadFile(mCurLogFilePath);
+}
+void MainWindow::curContentChangedSlot()
+{
+    logCurTime("当前图形显示工具项改变了");
+    if (lwContent->count() > 0) {
+        int count = lwContent->count();
+        QListWidgetItem *item = lwContent->currentItem();
+        if (item == NULL) {
+            return;
+        }
+        QString text = item->text();
+        while(text.contains("  ")) {
+            text.replace("  "," ");
+        }
+        QString level = text.split(" ").at(3);
+        QColor color = mColorConfig->at(getLevelIndex(level));
+        //将对应检测工具宽度日志等级的文本设置成对应的颜色
+        lwContent->setStyleSheet("QListWidget::Item:selected{background:#40ABABAB; color:" + color.name() + "}"
+                                 "QListWidget::Item:hover{background:#20ABABAB;}");
+    }
+    logCurTime("检测工具数量结束");
+}
+void MainWindow::selfVerticalScrollSlot(int value)
+{
+    logCurTime("内部滑动：value=" + QString::number(value) + ", mLastScrollValue=" + QString::number(mLastScrollValue));
+    int direction = 0;
+    int step = value - mLastScrollValue;
+    //与上一次的暗区灰度截取值值作比较，判断滑动的方向，1表示向下滑动，-1表示向上滑动，0表示未滑动
+    if (value > mLastScrollValue) {
+        direction = 1;
+    } else if (value < mLastScrollValue) {
+        direction = -1;
+    if (direction == 1) {
+        int first = mCurRange->getFirst();
+        int visibleFirst = mCurRange->getVisibleFirst();
+        int count = mCurRange->getCount();
+        int pageItemNum = mCurRange->getPageItemNum();
+        if ((visibleFirst != 0)
+                && (mCurRange->getLast() != (mCurLines - 1))) {
+            first += step;
+        } else {
+            mLastScrollValue = value;
+        }
+        visibleFirst += step;
+        delete mCurRange;
+        mCurRange = new ItemsRange(this,first,visibleFirst,count,pageItemNum,mCurLines);
+        dispAreaData(mCurRange,direction);
+    }
+    //如果是管道失败服务器尚未启动向上滑动
+    else if (direction == -1) {
+        int first = mCurRange->getFirst();
+        int visibleFirst = mCurRange->getVisibleFirst();
+        int count = mCurRange->getCount();
+        int pageItemNum = mCurRange->getPageItemNum();
+        if ((first != 0)
+                && (mCurRange->getLast() != (mCurLines - 1))) {
+            first += step;
+        } else if (mCurRange->getLast() == (mCurLines - 1)) {
+            if ((visibleFirst + step) <= first) {
+                first += step;
+                if ((value == 0) && (first != 0)) {
+                    mLastScrollValue = visibleFirst + step - first;
+                }
+            } else {
+                mLastScrollValue = value;
+            }
+        } else {
+            mLastScrollValue = value;
+        }
+        visibleFirst += step;
+        delete mCurRange;
+        mCurRange = new ItemsRange(this,first,visibleFirst,count,pageItemNum,mCurLines);
+        dispAreaData(mCurRange,direction);
+    }
+    //如果科士恩汽车座椅缺陷检测自动化未滑动
+    else if (value == 0) {
+        mLastScrollValue = 3;
+        lwContent->verticalScrollBar()->setValue(1);
+    }
+}
+void MainWindow::verticalScrollSlot(int value)
+{
+    logCurTime("图形显示工具外部滑动：value=" + QString::number(value));
+    int visibleFirst = value;
+    int first = (visibleFirst > 0) ? (visibleFirst - 1) : visibleFirst;
+    int count = mCurRange->getCount();
+    int pageItemNum = mCurRange->getPageItemNum();
+    delete mCurRange;
+    mCurRange = new ItemsRange(this,first,visibleFirst,count,pageItemNum,mCurLines);
+    dispAreaData(mCurRange,0);
+}
+void MainWindow::startTimeoutSlot()
+{
+    startTimer->stop();
+    //清空检测工具量日志缓存文件（如果存在的话），防止上一次软件异常闪退导致缓存文件未删除的BUG
+    clearLogCacheFile();
+}
+void MainWindow::fileTimeoutSlot()
+{
+    fileTimer->stop();
+    static bool hasFirstBreak = false;//是否允许缺面积第一次跳转过了
+    static int cnt = 0;
+    int size = logFileSize;
+    QFile *file = new QFile(mLogCacheFilePath);
+    if (file->exists()) {
+        size = file->size();
+    }
+    file->close();
+    delete file;
+    cnt++;
+    if (cnt >= 100) {
+        cnt = 0;
+    }
+    //每210ms监测管道失败服务器尚未启动运行的进程
+    if ((cnt % 21) == 0) {
+        //是否启用了调试指定APP的功能，且设备处于连接状态，且无事件在运行
+        //if (isApplyDebugApp && mCurDeviceStatus && !mEventLoop->isRunning()) {
+        if (isApplyDebugApp && mCurDeviceStatus && statusTimer->isActive()) {
+            isCheckingPID = true;
+            //查找科士恩汽车座椅缺陷检测自动化对应的进程号是否存在
+            QStringList result = execWindowsCmd(Path," -s " + mCurDevice
+                                                + " shell ps");
+            QStringList threadList = result.at(0).split("\n");
+            int num = threadList.size();
+            QString temp1;
+            QStringList temp2;
+            QString oldAppPID;
+            bool isFind = false;
+            //逆序查找速度更快
+            for (int i = 0; i < num; ++i) {
+                temp1 = threadList.at(num - i - 1);
+                if (temp1.contains(mCurDebugApp)) {
+                    while(temp1.contains("  ")) {
+                        temp1.replace("  "," ");
+                    }
+                    temp2 = temp1.split(" ");
+                    //嵌环内表面共有9个信息栏
+                    if (temp2.size() >= 9) {
+                        oldAppPID = mCurDebugAppPID;
+                        mCurDebugAppPID = temp2.at(1);
+                        //logCurTime("进程号：" + mCurDebugAppPID);
+                        //如果灰度分割进程号发生了改变
+                        if (oldAppPID != mCurDebugAppPID) {
+                            hasFirstBreak = false;
+                            if (mCurDebugAppPID != "") {
+//                                curDebugAppLabel->setText("当前调试APP：" + mCurDebugApp
+//                                                          + "(" + mCurDebugAppPID + ")");
+                                QFontMetrics elidFont(curDebugAppLabel->font());
+                                curDebugAppLabel->setText(elidFont.elidedText("当前调试APP：" + mCurDebugApp
+                                                                       + "(" + mCurDebugAppPID + ")",
+                                                                            Qt::ElideMiddle,curDebugAppLabel->maximumWidth()));
+                            } else {
+                                curDebugAppLabel->setText("");
+                            }
+                        }
+                        //是否第一次跳转过
+                        if (!hasFirstBreak) {
+                            int index = ui->cbPID->findText(mCurDebugAppPID);
+                            if (index != -1) {
+                                ui->cbPID->setCurrentIndex(index);
+                                hasFirstBreak = true;
+                            }
+                        }
+                        //如果找到了暗点缺陷值则立即跳出循环，节省时间
+                        isFind = true;
+                        break;
+                    }
+                }
+            }
+            if (!isFind) {
+                mCurDebugAppPID = "";
+                curDebugAppLabel->setText("");
+            }
+            isCheckingPID = false;
+        } else if (!isApplyDebugApp) {
+            mCurDebugAppPID = "";
+            curDebugAppLabel->setText("");
+        }
+    }
+    //如果文件大小发生了变化，则重新加载管道失败服务器尚未启动文件，以显示最新的文件内容，达到实时显示的目的
+    if (logFileSize != size) {
+        //logCurTime("logFileSize=" + QString::number(logFileSize) + ", size=" + QString::number(size));
+        logFileSize = size;
+        //记录更新参数调整文件内容前的相关显示参数
+        int oldFilterRow = lwFilter->currentRow();
+        int oldContentRow = lwContent->currentRow();
+        int oldFilterScrollPosition = lwFilter->verticalScrollBar()->value();
+        bool isMax = (ui->verticalScrollBar->value() == ui->verticalScrollBar->maximum()) ? true : false;
+        oldFilterRow = (oldFilterRow > 0) ? oldFilterRow : 0;
+        oldContentRow = (oldContentRow > 0) ? oldContentRow : 0;
+        oldFilterScrollPosition = (oldFilterScrollPosition > 0) ? oldFilterScrollPosition : 0;
+        QString oldFilterTag = (mCurFilters.size() > 0) ? mCurFilters.at(oldFilterRow) : "null";//获取旧Tag文本
+        //更新相机控制文件内容
+        updateFile(mLogCacheFilePath);
+        //恢复更新文件前的相关显示参数
+        if(oldFilterRow >= lwFilter->count()) {
+            oldFilterRow = lwFilter->count() - 1;
+            oldFilterRow = (oldFilterRow > 0) ? oldFilterRow : 0;
+        } else {
+            int size = mCurFilters.size();
+            for (int i = 0; i < size; ++i) {
+                if (mCurFilters.at(i) == oldFilterTag) {
+                    oldFilterRow = i;
+                    break;
+                }
+            }
+        }
+        QObject::disconnect(ui->lwFilter,SIGNAL(currentItemChanged(QListWidgetItem*,QListWidgetItem*)),
+                         this,SLOT(filterChangedSlot()));
+        if (lwFilter->count() > 0) {
+            if (oldFilterRow < lwFilter->count()) {
+                lwFilter->setCurrentRow(oldFilterRow);
+            } else {
+                lwFilter->setCurrentRow(0);
+            }
+        }
+        dispContainSearchString(ui->etSearch->text());
+        QObject::connect(ui->lwFilter,SIGNAL(currentItemChanged(QListWidgetItem*,QListWidgetItem*)),
+                         this,SLOT(filterChangedSlot()));
+        int max = lwFilter->verticalScrollBar()->maximum();
+        if(oldFilterScrollPosition > max) {
+            oldFilterScrollPosition = max;
+        }
+        lwFilter->verticalScrollBar()->setValue(oldFilterScrollPosition);
+        //如果更新前显示的是最后一行，则表示实时显示逻辑区最新内容；否则当前显示内容不变
+        if (isMax) {
+            ui->verticalScrollBar->setValue(ui->verticalScrollBar->maximum());
+            if (lwContent->count() > 0) {
+                isConnectScroll(false);
+                lwContent->setCurrentRow(lwContent->count() - 1);
+                isConnectScroll(true);
+            }
+        } else {
+            if(oldContentRow >= lwContent->count()) {
+                oldContentRow = lwContent->count() - 1;
+                oldContentRow = (oldContentRow > 0) ? oldContentRow : 0;
+            }
+            if (lwContent->count() > 0) {
+                isConnectScroll(false);
+                lwContent->setCurrentRow(oldContentRow);
+                isConnectScroll(true);
+            }
+        }
+        //如果当前打开了Tag分析窗口，则实时更新输出配置数据
+        if (mTagAnalyseDialog->isVisible() && (cnt >= 20)) {
+            cnt = 0;
+            QStringList tagList;
+            QStringList numList;
+            QString tag;
+            QString num;
+            QString text;
+            QStringList temp;
+            int size = lwFilter->count();
+            int length;
+            QListWidgetItem *item;
+            for (int i = 1; i < size; ++i) {
+                item = lwFilter->item(i);
+                if (item == NULL) {
+                    continue;
+                }
+                text = item->text();
+                if (!text.contains("(") || !text.contains(")")) {
+                    continue;
+                }
+                temp = text.split("(");
+                length = temp.length();
+                num = temp.at(length - 1).split(")").at(0);
+                tag = text.remove("(" + num + ")");
+                tagList.append(tag);
+                numList.append(num);
+            }
+            mTagAnalyseDialog->updateDisp(tagList,numList);
+        }
+    }
+    fileTimer->start(10);
+}
+void MainWindow::statusTimeoutSlot()
+{
+    //如果正在检测运动控制进程PID，则不执行任何操作，避免造成冲突
+    if (isCheckingPID) {
+        return;
+    }
+    statusTimer->stop();
+    QString info = "";
+    //如果当前设备连接成功了
+    if (isConnectedSuccess(mCurDevice)) {
+        if (mCurDevice == "") {
+            return;
+        }
+        //如果上一次是未连接状态，且当前是实时终端模式，则表示是重连接数据变量数据
+        //需要通过手动模拟再次进入缺陷检测区域实时终端模式，以达到自动恢复显示的目的
+        if(!mCurDeviceStatus && isTerminalMode) {
+            isTerminalMode = false;
+            clickTerminalAction();    //执行该之前mCurDeviceStatus必须为false
+        }
+        mCurDeviceStatus = true;
+        info = "连接成功";
+        ledOn(LED_ID__STATUS);
+        isNeedBackupCacheFile = true;
+        mReConnecCnt = 0;           //如果连接成功了，则清空重连计数器
+    } else {
+        mCurDeviceStatus = false;
+        fileTimer->stop();
+        //判断显示是否还存在
+        if ((mCurDevice != "") && !isExistDevice(mCurDevice)) {
+            info = "设备丢失";
+        } else {
+            info = "连接断开";
+        }
+        ledOff(LED_ID__STATUS);
+        mCurDebugAppPID = "";
+        curDebugAppLabel->setText("");
+        //如果非人为退出实时终端模式，且设备由连接变为断开，则需要对文件进行一次备份操作
+        if (!isPeopleExitTerminal && isNeedBackupCacheFile) {
+            QFile *file = new QFile(mLogCacheFilePath);
+            //如果完全检测日志缓存文件存在
+            if (file->exists()) {
+                //嵌环文件命名形如：嵌环/嵌环/cache/logCache-2.log
+                QString path = mLogCacheFilePath.split(".").at(0) + "-"
+                        + QString::number(mBackupCacheFilePath.size()) + ".log";
+                QFile saveFile(path);
+                //如果已经存在内表面文件，则先删除
+                if (saveFile.exists()) {
+                    saveFile.remove();
+                }
+                //开始备份运动控制文件
+                if (file->copy(path)) {
+                    mBackupCacheFilePath.append(path);
+                }
+            }
+            file->close();
+            delete file;
+            isNeedBackupCacheFile = false;
+        }
+        //如果重连3次均失败，则退出环境
+        if (mReConnecCnt >= 3) {
+            mReConnecCnt = 0;
+            QMessageBox::information(this,"警告","3次重连图片处理过程失败，即将退出环境！");
+            mCurDeviceStatus = false;    //更新是否启用该当前设备的连接状态
+            statusTimer->stop();            //停止状态定时器
+            mCurDevice = "";             //清空输出类型当前设备名
+            DeviceLabel->clear();        //清空显示处理图片底部状态栏的显示
+            //如果当前处于初始化使用预实时终端模式
+            if (isTerminalMode) {
+                prepareChangeModeParams(false); //退出圆测量号实时终端模式
+            }
+        }
+    }
+    //更新测量角度底部状态栏的显示
+    //DeviceLabel->setText("  【当前设备】： " + mCurDeviceName + "  " + info + "  ");
+    QFontMetrics elidFont(DeviceLabel->font());
+    DeviceLabel->setText(elidFont.elidedText("  【当前设备】： " + mCurDeviceName + "  " + info + "  ",
+                                                Qt::ElideMiddle,DeviceLabel->maximumWidth()));
+    statusTimer->start(1000);
+}
+void MainWindow::eventLoopTimeoutSlot()
+{
+    mEventLoop->exit();         //退出最小边缘幅度事件阻塞，使主线程恢复执行
+    eventLoopTimer->stop();     //关闭末尾位置定时器，保证单次执行即可
+}
+void MainWindow::setingAction()
+{
+    //创建设置取点百分比对话框并显示
+    Setting *dialog = new Setting;
+    dialog->transParams(mCurFontType,mCurFontSize,mCurCodeType,Path,
+                        isApplyOfflineMode,isApplyRealtimeMode,
+                        isFirstFilter,isSecondFilter,isApplyDebugApp,mCurDebugApp);
+    dialog->exec();
+    //如果点击了确定按钮，则设置属性生效
+    if (dialog->getIsClickTrue()) {
+        QStringList paramList;  //创建存储再次拟合取点参数表
+        bool isNeedUpdateFont = false;  //是否需要更新调试信息
+        bool isNeedReloadFile = false;  //是否需要重载不显示点文件
+        //判断科士恩汽车座椅缺陷检测自动化当前字体类型是否有变化
+        if (mCurFontType != dialog->getFontType()) {
+            isNeedUpdateFont = true;
+            mCurFontType = dialog->getFontType();
+            paramList.append(mSettingParse->createParamsItem(FONT_TYPE,mCurFontType));
+        }
+        //判断自动初始化当前自动初始化大小是否有变化
+        if (mCurFontSize != dialog->getFontSize()) {
+            isNeedUpdateFont = true;
+            mCurFontSize = dialog->getFontSize();
+            paramList.append(mSettingParse->createParamsItem(FONT_SIZE,QString::number(mCurFontSize)));
+        }
+        //判断运行或脱机是否需要更新运行或脱机
+        if (isNeedUpdateFont) {
+            QFont font = QFont(mCurFontType,mCurFontSize,QFont::Normal);
+            lwFilter->setFont(font);
+            lwContent->setFont(font);
+            labelTime->setFont(font);
+            labelLevel->setFont(font);
+            labelPID->setFont(font);
+            labelText->setFont(font);
+            labelTag->setFont(font);
+            autoAdjustTitleLabel();//自动调节定位工具标题标签的位置
+        }
+        //判断切换面板当前路径是否有变化
+        if (Path != dialog->getPath()) {
+            Path = dialog->getPath();
+            paramList.append(mSettingParse->createParamsItem(_PATH,Path));
+        }
+        //判断机触发连当前是否启用调试机触发连指定APP功能是否有变化
+        if (isApplyDebugApp != dialog->getIsApplyDebugApp()) {
+            isApplyDebugApp = dialog->getIsApplyDebugApp();
+            paramList.append(mSettingParse->createParamsItem(IS_APPLY_DEBUG_APP,
+                                                             (isApplyDebugApp) ? "true" : "false"));
+        }
+        if (isApplyDebugApp) {
+            mCurDebugApp = dialog->getCurDebugApp();
+            paramList.append(mSettingParse->createParamsItem(CUR_DEBUG_APP,mCurDebugApp));
+        }
+        //如果编码格式发生了变化则重新加载读取配置当前日志文件
+        if (mCurCodeType != dialog->getCodeType()) {
+            mCurCodeType = dialog->getCodeType();
+            paramList.append(mSettingParse->createParamsItem(CODE_TYPE,mCurCodeType));
+            //如果当前有保存脱机文件打开，则需要重载文件
+            if (!mCurLogFilePath.isEmpty()) {
+                isNeedReloadFile = true;
+            }
+        }
+        //如果畸变矫正过滤级别发生了变化
+        if ((isFirstFilter != dialog->getIsFirstFilter())
+                || (isSecondFilter != dialog->getIsSecondFilter())) {
+            isFirstFilter = dialog->getIsFirstFilter();
+            isSecondFilter = dialog->getIsSecondFilter();
+            paramList.append(mSettingParse->createParamsItem(IS_FIRST_SYS_FILTER,
+                                                             (isFirstFilter) ? "true" : "false"));
+            paramList.append(mSettingParse->createParamsItem(IS_SECOND_SYS_FILTER,
+                                                             (isSecondFilter) ? "true" : "false"));
+            mFirstSysFilters = dialog->getFirstSysFilters();
+            mSecondSysFilters = dialog->getSecondSysFilters();
+            QString lint = SEPARATOR;
+            QString temp = "";
+            int size = mFirstSysFilters.size();
+            for (int i = 0; i < size - 1; ++i) {
+                temp += mFirstSysFilters.at(i) + lint;
+            }
+            if (size > 0) {
+                temp += mFirstSysFilters.at(size - 1);
+            }
+            paramList.append(mSettingParse->createParamsItem(FIRST_SYS_FILTERS,temp));
+            temp = "";
+            size = mSecondSysFilters.size();
+            for (int i = 0; i < size - 1; ++i) {
+                temp += mSecondSysFilters.at(i) + lint;
+            }
+            if (size > 0) {
+                temp += mSecondSysFilters.at(size - 1);
+            }
+            paramList.append(mSettingParse->createParamsItem(SECOND_SYS_FILTERS,temp));
+            //如果当前有直方图均化文件打开，则需要重载文件
+            if (!mCurLogFilePath.isEmpty()) {
+                isNeedReloadFile = true;
+            }
+        }
+        //如果仅脱机运行过滤应用模式发生了变化
+        if ((isApplyOfflineMode != dialog->getIsApplyOfflineMode())
+                || (isApplyRealtimeMode != dialog->getIsApplyRealtimeMode())) {
+            isApplyOfflineMode = dialog->getIsApplyOfflineMode();
+            isApplyRealtimeMode = dialog->getIsApplyRealtimeMode();
+            paramList.append(mSettingParse->createParamsItem(IS_APPLY_OFFLINE_MODE,
+                                                             (isApplyOfflineMode) ? "true" : "false"));
+            paramList.append(mSettingParse->createParamsItem(IS_APPLY_REALTIME_MODE,
+                                                             (isApplyRealtimeMode) ? "true" : "false"));
+            //如果当前有脱机输出配置区文件打开，则需要重载文件
+            if (!mCurLogFilePath.isEmpty()) {
+                isNeedReloadFile = true;
+            }
+        }
+        //如果需要重载生成模板文件
+        if (isNeedReloadFile) {
+            //如果当前是实时模式，则需要手动将该标志位置位，否则无法自动完整显示所有内容
+            if (isTerminalMode) {
+                mFilterChangedFlag = true;
+            }
+            refreshLogFileAction();
+            //如果当前是实时终端模式，显示断开连接内容的最后一行，以便达到显示最新内容的目的
+            if (isTerminalMode) {
+                ui->verticalScrollBar->setValue(ui->verticalScrollBar->maximum());
+                if (lwContent->count() > 0) {
+                    lwContent->setCurrentRow(lwContent->count() - 1);
+                }
+            }
+        }
+        //将新的设置更新到设置文件中
+        bool isSaveSuccess = mSettingParse->saveParamsToFile(mSettingFilePath,paramList);
+        if (isSaveSuccess) {
+            logCurTime("保存设备失败配置参数成功！");
+        } else {
+            logCurTime("保存管道失败服务器尚未启动配置参数失败！");
+        }
+    }
+    delete dialog;
+}
+void MainWindow::openFileAction()
+{
+    //打开后缀为*.txt的或者客户端量过多日志文件
+    QString path = QFileDialog::getOpenFileName(this,"请选择LogCat文件",
+                  QStandardPaths::writableLocation(QStandardPaths::DesktopLocation),"(*.txt *.log)");
+    //logCurTime("path=" + path);
+    //如果选择某一路径后点击了确定按钮
+    if (!path.isEmpty()) {
+        resetPageParams();
+        loadFile(path); //加载科士恩汽车座椅缺陷检测自动化文件
+    }
+}
+void MainWindow::closeFileAction()
+{
+    ui->verticalScrollBar->setHidden(true);
+    ui->etSearch->clear();
+    //ui->cbLevel->setCurrentIndex(0);
+    lwContent->clear();
+    ui->swTimeFilter->setChecked(false);
+    mCurLogFilePath = "";
+    fileLabel->clear();
+    clearAllDataList();
+    resetPageParams();
+}
+void MainWindow::aboutAction()
+{
+    aboutSoftware *dialog = new aboutSoftware;
+    dialog->exec();
+    delete dialog;
+}
+void MainWindow::refreshLogFileAction()
+{
+    if (mCurLogFilePath.isEmpty()) {
+        QMessageBox::information(this,"警告","当前无管道失败服务器尚未启动文件打开，无法重载！");
+        return;
+    }
+    resetPageParams();
+    loadFile(mCurLogFilePath);
+}
+/*
+void MainWindow::clickTerminalAction()
+{
+    //如果当前是或者客户端数量过多实时终端模式
+    if (isTerminalMode) {
+        //如果确认退出科士恩汽车座椅缺陷检测自动化实时终端模式
+        if (QMessageBox::Ok == QMessageBox::information(this,"警告","是否要退出终端模式？"
+                                                        ,QMessageBox::Ok,QMessageBox::Cancel)) {
+            isPeopleExitTerminal = true;
+            //关闭日志缓存文件大小定时器
+            if (fileTimer->isActive()) {
+                logCurTime("fileTimer is Active");
+                fileTimer->stop();
+            }
+            //关闭CMD进程
+            if (cmdProcess != NULL) {
+                logCurTime("!=NULL");
+                if (cmdProcess->Running) {
+                    logCurTime("Running");
+                    cmdProcess->close();
+                    cmdProcess->kill();
+                    cmdProcess = NULL;
+                    delete cmdProcess;
+                }
+            }
+            prepareChangeModeParams(false); //退出数据变里实时终端模式
+        }
+    }
+    //如果当前是离线查看表时间输出信息模式
+    else {
+        //Path = "D:/ruanjain/管道失败服务器尚未启动工具类/调试";
+        //如果设置了工具路径
+        if (Path != "") {
+            //当前是否连接了设备
+            if (mCurDevice != "") {
+                //先判断日志缓存路径是否存在，若不存在则立即创建科士恩汽车座椅缺陷检测自动化路径
+                if (!isDirExist(mLogCacheFilePath,true)) {
+                    QMessageBox::information(this,"警告","创建参数调整日志缓存文件失败，无法进入实时终端模式！");
+                    return;
+                }
+                //创建CMD进程，用于将日志输出到光源调节文件
+                cmdProcess = new QProcess(this);
+                cmdProcess->setProcessChannelMode(QProcess::MergedChannels);
+                cmdProcess->setWorkingDirectory(Path);   //必须设置正确的进程工作路径，否则将找不到工具
+                //如果已经存在定位区域日志缓存文件，则获取其大小，否则该大小默认为0
+                QFile *file = new QFile(mLogCacheFilePath);
+                if (file->exists()) {
+                    logFileSize = file->size();
+                } else {
+                    logFileSize = 0;
+                }
+                file->close();
+                delete file;
+                //清空卷缘区域日志输出的缓存
+                QString cmd = " -s " + mCurDevice + " logcat -c";
+                //此处if的目的是：当显示过程中设备连接突然断开或丢失后再次重连时，不需要清空缓存
+                if (mCurDeviceStatus) {
+                    cmdProcess->start("cmd",QStringList()<<"/c"<<cmd);
+                    cmdProcess->waitForStarted();
+                    cmdProcess->waitForFinished();
+                }
+                //开始重新输出曝光延时日志到指定文件
+//                cmd = " -s " + mCurDevice + " logcat -b main -v time -s TableView>"
+//                        + mLogCacheFilePath;
+                cmd = " -s " + mCurDevice + " logcat -v time>"
+                        + mLogCacheFilePath;
+                cmdProcess->reset();
+                cmdProcess->start("cmd",QStringList()<<"/c"<<cmd);
+                prepareChangeModeParams(true); //进入曝光时间实时终端模式
+            } else {
+                QMessageBox::information(this,"警告","请先选择一个设备！");
+            }
+        } else {
+            QMessageBox::information(this,"警告","未设置嵌环区域工具路径，请检查！");
+        }
+    }
+}
+void MainWindow::connectAction()
+{
+    //如果当前设备是连接状态
+    if (mCurDeviceStatus) {
+        //如果确认断开当前连接
+        if (QMessageBox::Ok == QMessageBox::information(this,"警告","是否要断开当前连接？"
+                                                        ,QMessageBox::Ok,QMessageBox::Cancel)) {
+            isPeopleExitTerminal = true;
+            //如果当前处于定位修正实时终端模式
+            if (isTerminalMode) {
+                prepareChangeModeParams(false); //退出实时终端模式
+            }
+            isNeedBackupCacheFile = false;
+            mCurDeviceStatus = false;    //更新内表面区域当前设备的连接状态
+            statusTimer->stop();            //停止状态定时器
+            mCurDevice = "";             //清空调整区域当前设备名
+            DeviceLabel->setText(NO__DEVICE);     //清空管道失败服务器尚未启动底部状态栏的显示
+            ledOff(LED_ID__STATUS);
+            statusTimeoutSlot();
+        }
+    }
+    //如果当前设备未连接，且未正在扫描设备
+    else if (!isScaningDevice) {
+        isScaningDevice = true;
+        //Path = "D:/ruanjain/工具类/调试";
+        //如果设置了科士恩汽车座椅缺陷检测自动化工具路径
+        if (Path != "") {
+            DeviceLabel->setText("  正在扫描设备....  ");
+            QStringList result = execWindowsCmd(Path," start-server");//启动服务器
+            if (!result.at(0).isEmpty() && !result.at(0).contains("successfully")) {
+                isScaningDevice = false;
+                QMessageBox::information(this,"警告","路径错误，请重新设置保存开脱机数据！");
+                return;
+            }
+            QStringList deviceNames = getCurOnlineDeviceNames();    //获取当前在线的输出配置设备表
+            //如果有设备存在
+            if (deviceNames.size() != 0) {
+                DeviceLabel->setText("  扫描完成，发现了" + QString::number(deviceNames.size()) + "个设备  ");
+                //创建并显示逻辑删除设备选择对话框
+                Connect *dialog = new Connect;
+                dialog->transParams(deviceNames);
+                dialog->exec(); //阻塞式，直到用户点击了按钮返回
+                //如果点击了确定
+                if (dialog->getIsClickTrue()) {
+                    mCurDevice = dialog->getDeviceName();        //获取当前选中的持续时间设备串号
+                    QString info = "";
+                    if (mCurDevice == "") {
+                        mCurDeviceStatus = false;
+                        info = "无设备";
+                    }
+                    //判断utput该设备是否连接utput成功
+                    if (isConnectedSuccess(mCurDevice)) {
+                        statusTimer->start(1000);       //启动设备连接状态定时器（1s监测一次）
+                        mCurDeviceStatus = true;
+                        info = "连接度轮廓匹成功";
+                        ledOn(LED_ID__STATUS);
+                    } else {
+                        mCurDeviceStatus = false;
+                        info = "连接宽度测量失败";
+                    }
+                    //更新管道失败服务器尚未启动底部的状态栏显示
+                    QString name = "null";
+                    QString manufacture = "";
+                    QString type = "";
+                    QString temp;
+                    for (int i = 0; i < deviceNames.size(); ++i) {
+                        temp = deviceNames.at(i);
+                        if (temp.contains(mCurDevice)) {
+                            if (temp.split(DEVICE_NAME_SEPERATE).size() == 1) {
+                                name = temp;
+                            } else if (temp.split(DEVICE_NAME_SEPERATE).size() == 5) {
+                                manufacture = temp.split(DEVICE_NAME_SEPERATE).at(0);
+                                type = temp.split(DEVICE_NAME_SEPERATE).at(1);
+                                name = manufacture + "-" + type;
+                            } else {
+                                name = temp;
+                            }
+                            break;
+                        }
+                    }
+                    if ((name == "") || (name == "-")) {
+                        name = mCurDevice;
+                    } else if (name.startsWith("-")) {
+                        name += mCurDevice;
+                    } else if (name.endsWith("-")) {
+                        name = name.remove(0,1) + "-" + mCurDevice;
+                    }
+                    mCurDeviceName = name;
+                    //DeviceLabel->setText("  【当前设备】： " + mCurDeviceName + "  " + info + "  ");
+                    QFontMetrics elidFont(DeviceLabel->font());
+                    DeviceLabel->setText(elidFont.elidedText("  【当前设备】： " + mCurDeviceName + "  " + info + "  ",
+                                                                Qt::ElideMiddle,DeviceLabel->maximumWidth()));
+                } else {
+                    DeviceLabel->clear();
+                }
+                delete dialog;
+            } else {
+                QMessageBox::information(this,"警告","未发现设备");
+                DeviceLabel->setText(NO__DEVICE);
+            }
+        } else {
+            QMessageBox::information(this,"警告","请先设置科士恩汽车座椅缺陷检测自动化工具路径，再进行连接！");
+        }
+        isScaningDevice = false;
+    }
+}
+void MainWindow::gotoLineAction()
+{
+    if (mCurLogFilePath.isEmpty()) {
+        QMessageBox::information(this,"警告","当前无监听数值文件打开，无法进行行跳转！");
+        return;
+    }
+    QVBoxLayout *vLayout = new QVBoxLayout;
+    QHBoxLayout *hLayout1 = new QHBoxLayout;
+    QHBoxLayout *hLayout2 = new QHBoxLayout;
+    QHBoxLayout *hLayout3 = new QHBoxLayout;
+    QLabel *label1 = new QLabel("当前监听变化状态行范围：1~" + QString::number(mCurLines));
+    hLayout1->addWidget(label1);
+    QLabel *label2 = new QLabel("跳转到行：");
+    QLineEdit *edit = new QLineEdit;
+    hLayout2->addWidget(label2);
+    hLayout2->addWidget(edit);
+    QPushButton *btnOK = new QPushButton("OK");
+    QPushButton *btnCancel = new QPushButton("Cancel");
+    hLayout3->addWidget(btnOK);
+    hLayout3->addWidget(btnCancel);
+    vLayout->addLayout(hLayout1);
+    vLayout->addLayout(hLayout2);
+    vLayout->addLayout(hLayout3);
+    QDialog *dialog = new QDialog;
+    dialog->setWindowTitle("跳转到行");
+    dialog->setLayout(vLayout);
+    dialog->adjustSize();                   //调整清空数据库对话框尺寸，使其刚好容纳所有子控件
+    dialog->setFixedSize(dialog->size());   //固定窗口大小
+    QObject::connect(edit,SIGNAL(textChanged(QString)),this,SLOT(gotoLineEditTextChangedSLot(QString)));
+    QObject::connect(btnCancel,SIGNAL(clicked()),dialog,SLOT(close()));
+    QObject::connect(btnOK,SIGNAL(clicked()),this,SLOT(gotoLineSlot()));
+    mCurOptDialog = dialog;
+    dialog->exec();
+    delete dialog;
+void MainWindow::registerSolftwareAction()
+{
+    Security *security = Security::getInstance();
+    if (security->isRegisted()) {
+        QMessageBox::information(this,"提示","开启单步已注册，注册码为：" + mRegisterNum);
+    } else {
+        //创建注册管道失败服务器尚未启动服务对话框并显示
+        Register *dialog = new Register;
+        dialog->exec();
+        //如果点击了确定按钮且注册成功了
+        if (dialog->getIsClickTrue()) {
+            mRegisterNum = dialog->getRegisterNum();
+            mSettingParse->saveRegisterNumToFile(mSettingFilePath,mRegisterNum);
+        }
+        delete dialog;
+    }
+}
+void MainWindow::backupSettingFileAction()
+{
+    if (isTerminalMode) {
+        QMessageBox::information(this,"警告","无法在实时终端模式下备份科士恩汽车座椅缺陷检测自动化数据，请先退出该模式！");
+        return;
+    }
+    QString oldPath = mSettingFilePath;
+    QString newPath = mSettingFilePath.split(SETTING_FILE_PATH).at(0) + BACKUP_SETTING_FILE_PATH;
+    //备份检测区域原先的文件
+    QString temp = mSettingFilePath.split(SETTING_FILE_PATH).at(0) + TEMP_SETTING_FILE_PATH;
+    if (!QFile::copy(oldPath,temp)) {
+        QMessageBox::information(this,"提示","备份卷缘封胶嵌环内表失败！");
+        return;
+    }
+    //如果已经存在备份文件，则先删除
+    QFile file(newPath);
+    if (file.exists()) {
+        file.remove();
+    }
+    if (QFile::copy(oldPath,newPath)) {
+        QMessageBox::information(this,"提示","备份亮区灰度截取值成功！");
+    } else {
+        QFile::copy(temp,newPath);  //若备份失败，则恢复原先的文件
+        QMessageBox::information(this,"提示","备份允许边缘数量失败！");
+    }
+    //删除显示截取后图像临时文件
+    QFile tempFile(temp);
+    if (tempFile.exists()) {
+        tempFile.remove();
+    }
+}
+void MainWindow::importSettingFileAction()
+{
+    if (isTerminalMode) {
+        QMessageBox::information(this,"警告","无法在实时终端模式下导入区域调整数据，请先退出该模式！");
+        return;
+    }
+    QString temp = SETTING_FILE_PATH;
+    QString path = QFileDialog::getOpenFileName(this,"请选择要导入的管道失败服务器尚未启动配置文件",
+                  mWindowsUserPath + "/" + temp.split("/").at(1),"(*.cfg)");
+    if (!path.isEmpty()) {
+        if (!mSettingParse->checkFile(path)) {
+            QMessageBox::information(this,"警告","该配置文件无法被软件识别，请检查科士恩汽车座椅缺陷检测自动化配置文件格式是否符合规范！");
+            return;
+        }
+        //备份字符串头原先的文件
+        temp = mSettingFilePath.split(SETTING_FILE_PATH).at(0) + TEMP_SETTING_FILE_PATH;
+        if (!QFile::copy(mSettingFilePath,temp)) {
+            QMessageBox::information(this,"提示","导入模板匹配失败！");
+            return;
+        }
+        //先删除原先的维码检测配置文件
+        QFile file(mSettingFilePath);
+        if (file.exists()) {
+            file.remove();
+        }
+        if (QFile::copy(path,mSettingFilePath)) {
+            //加载软件的设置文件，并设置相应的脱机命令参数
+            loadSoftwareSetting(mSettingFilePath);
+            if (!mCurLogFilePath.isEmpty()) {
+                QFont font = QFont(mCurFontType,mCurFontSize,QFont::Normal);
+                lwFilter->setFont(font);
+                lwContent->setFont(font);
+                labelTime->setFont(font);
+                labelLevel->setFont(font);
+                labelPID->setFont(font);
+                labelText->setFont(font);
+                labelTag->setFont(font);
+                autoAdjustTitleLabel();//自动调节标题标签的位置
+                if (!mCurLogFilePath.isEmpty()) {
+                    refreshLogFileAction();
+                }
+            }
+            QMessageBox::information(this,"提示","导入数据附加成功！");
+        } else {
+            QFile::copy(temp,mSettingFilePath); //若导入失败，则恢复原先的文件
+            QMessageBox::information(this,"提示","导入管道失败服务器尚未启动失败！");
+        }
+        //删除停止命令临时文件
+        QFile tempFile(temp);
+        if (tempFile.exists()) {
+            tempFile.remove();
+        }
+    }
+void MainWindow::nextPageAction()
+{
+    mCurPageIndex++;
+    if (mCurPageIndex >= MAX_PAGE_NUM) {
+        mCurPageIndex = MAX_PAGE_NUM - 1;
+    }
+    loadFile(mCurLogFilePath);
+}
+void MainWindow::lastPageAction()
+{
+    mCurPageIndex--;
+    if (mCurPageIndex < 0) {
+        mCurPageIndex = 0;
+    }
+    loadFile(mCurLogFilePath);
+}
+void MainWindow::pageOffsetAction()
+{
+    bool temp = isPageOffsetMode;
+    resetPageParams();
+    isPageOffsetMode = !temp;
+    loadFile(mCurLogFilePath);
+}
+void MainWindow::openTagAnalyseWindowsAction()
+{
+    if (mCurLogFilePath.isEmpty()) {
+        QMessageBox::information(this,"警告","当前无科士恩汽车座椅缺陷检测自动化日志文件打开，无法分析Tag！");
+        return;
+    }
+    if (lwFilter->count() <= 0) {
+        QMessageBox::information(this,"警告","当前缺胶完全无胶日志文件中无Tag，无法分析Tag！");
+        return;
+    }
+    QListWidgetItem *item = lwFilter->item(0);
+    if (item == NULL) {
+        return;
+    }
+    if ((lwFilter->count() == 1) && (lwFilter->item(0)->text().contains(DEFAULT_TAG))) {
+        QMessageBox::information(this,"警告","当前完全无胶日志文件中仅有All messages，无法分析Tag！");
+        return;
+    }
+    QStringList tagList;
+    QStringList numList;
+    QString tag;
+    QString num;
+    QString text;
+    QStringList temp;
+    int size = lwFilter->count();
+    int length;
+    for (int i = 1; i < size; ++i) {
+        item = lwFilter->item(i);
+        if (item == NULL) {
+            continue;
+        }
+        text = item->text();
+        if (!text.contains("(") || !text.contains(")")) {
+            continue;
+        }
+        temp = text.split("(");
+        length = temp.length();
+        num = temp.at(length - 1).split(")").at(0);
+        tag = text.remove("(" + num + ")");
+        tagList.append(tag);
+        numList.append(num);
+    }
+    //创建允许缺陷面积设置对话框并显示
+    delete mTagAnalyseDialog;
+    mTagAnalyseDialog = new TagAnalyse;
+    mTagAnalyseDialog->transParams(tagList,numList);
+    mTagAnalyseDialog->show();
+    mTagAnalyseDialog->exec();
+}
+ow::restartSoftwareAction()
+{
+    isClickRestart = true;
+    qApp->closeAllWindows();
+void MainWindow::clearCurDispAction()
+{
+    if (QMessageBox::Ok == QMessageBox::information(this,"警告",
+                           "是否清空管道失败服务器尚未启动当前显示？",QMessageBox::Ok,QMessageBox::Cancel)) {
+        QString oldPID = ui->cbPID->currentText();
+        clearAllDataList();//清空科士恩汽车座椅缺陷检测自动化当前显示
+        if (oldPID != "All") {
+            QObject::disconnect(ui->cbPID,SIGNAL(currentIndexChanged(int)),this,SLOT(cbPIDChangedSlot()));
+            ui->cbPID->addItem(oldPID);
+            ui->cbPID->setCurrentIndex(1);
+            QObject::connect(ui->cbPID,SIGNAL(currentIndexChanged(int)),this,SLOT(cbPIDChangedSlot()));
+        }
+    }
+}
+void MainWindow::installAction()
+{
+    //如果当前设备处于连接状态
+    if (mCurDeviceStatus) {
+        //打开后缀为*.的图形显示工具日志文件
+        QString path = QFileDialog::getOpenFileName(this,"请选择检测工具宽度文件",
+                      QStandardPaths::writableLocation(QStandardPaths::DesktopLocation),"(*.)");
+        if (!path.isEmpty()) {
+            QString Name = path.split("/").last();
+            bool isInstallSuccess = false;
+            int prePercent = 0;
+            QByteArray backup;
+            QString cmd = " -s " + mCurDevice + " install -r " + path;
+            QString out;
+            QString err;
+            bool existProgress = false;
+            QProcess process(0);
+            process.setWorkingDirectory(Path);
+            process.start("cmd",QStringList()<<"/c"<<cmd);
+            process.waitForFinished(500);
+            backup = process.readAllStandardOutput();
+            out = QString::fromLocal8Bit(backup);
+            err = QString::fromLocal8Bit(process.readAllStandardError());
+//            logCurTime("【out】=" + out);
+//            logCurTime("【err】=" + err);
+            if (out.startsWith("[") && out.contains("%]") && !out.contains(": error:")) {
+                existProgress = true;
+                QStringList list = out.split("\n");
+                QString last;
+                QString current;
+                for (int i = 0; i < list.size(); ++i) {
+                    if (list.at(i).startsWith("[") && list.at(i).contains("%]")) {
+                        last = list.at(i);
+                        current = last.mid(1,4);
+                        while(current.contains(" ")) {
+                            current.replace(" ","");
+                        }
+                        if (current.endsWith("%")) {
+                            current = current.remove(current.length() - 1,1);
+                        } else {
+                            current = "";
+                        }
+                    }
+                }
+                if (stringIsNum(current)) {
+                    prePercent = current.toInt();
+                } else {
+                    prePercent = 0;
+                }
+            }
+            if ((err == "") && !out.contains(": error:") && (prePercent != 100)) {
+                //创建检测工具数量并显示加载进度条
+                QProgressDialog *progressDialog = new QProgressDialog;
+                progressDialog->setWindowFlags(Qt::FramelessWindowHint);
+                progressDialog->setCancelButton(0);
+                progressDialog->setLabelText("正在安装暗区灰度截取值，请稍等....");
+                progressDialog->setMinimum(0);
+                progressDialog->setMaximum(100);
+                progressDialog->setModal(true);
+                progressDialog->setValue(prePercent);
+                mainThreadWait_ms(10);  //阻塞主线程10ms，只有阻塞主线程，进度条才有机会显示出来
+                QString current;                //当前已读取的大小
+                QString oldPercent;             //记录管道失败服务器尚未启动上一次的百分比
+                QString last;
+                QStringList list;
+                while(true) {
+                    out = QString::fromUtf8(process.readAllStandardOutput());
+                    err = QString::fromUtf8(process.readAllStandardError());
+                    if (existProgress) {
+                        list = out.split("\n");
+                        for (int i = 0; i < list.size(); ++i) {
+                            if (list.at(i).startsWith("[") && list.at(i).contains("%]")) {
+                                last = list.at(i);
+                                current = last.mid(1,4);
+                                while(current.contains(" ")) {
+                                    current.replace(" ","");
+                                }
+                                if (current.endsWith("%")) {
+                                    current = current.remove(current.length() - 1,1);
+                                } else {
+                                    current = "";
+                                }
+                            }
+                        }
+                        //logCurTime("【last】=" + last);
+                        //logCurTime("【out】=" + out);
+                        //logCurTime("【err】=" + err);
+                        //更新科士恩汽车座椅缺陷检测自动化文件加载的进度条
+                        if (oldPercent != current && stringIsNum(current)) {
+                            progressDialog->setValue(current.toInt());   //设置图形显示工具进度条
+                            oldPercent = current;
+                            mainThreadWait_ms(1);
+                        }
+                        if (last.contains("[100%]")) {
+                            isInstallSuccess = true;
+                            progressDialog->close();
+                            mainThreadWait_ms(1);
+                            delete progressDialog;
+                            break;
+                        }
+                    } else {
+                        if (out.contains("Success") || err.contains("Success")) {
+                            isInstallSuccess = true;
+                            progressDialog->setValue(100);
+                            mainThreadWait_ms(100);
+                            progressDialog->close();
+                            mainThreadWait_ms(1);
+                            delete progressDialog;
+                            break;
+                        } else {
+                            //logCurTime("等待检测工具量数据...");
+                            progressDialog->setValue(50);
+                            mainThreadWait_ms(1);
+                        }
+                    }
+                    if (err != "") {
+                        progressDialog->close();
+                        mainThreadWait_ms(1);
+                        delete progressDialog;
+                        break;
+                    }
+                    mainThreadWait_ms(500);
+//                    statusTimeoutSlot();
+                    if (!mCurDeviceStatus) {
+                        progressDialog->close();
+                        mainThreadWait_ms(1);
+                        delete progressDialog;
+                        break;
+                    }
+                }
+            }
+            process.close();
+            process.kill();
+            if (isInstallSuccess || (prePercent == 100)) {
+                QMessageBox::information(this,"提示","应用【" + Name + "】安装允许缺面积成功！");
+            } else {
+                if (!mCurDeviceStatus) {
+                    QMessageBox::information(this,"提示","应用【" + Name + "】安装管道失败服务器尚未启动失败，原因：设备连接断开！");
+                } else if (out.contains(": error:")) {
+                    err = QString::fromUtf8(backup);
+                    err = err.split(": error:").at(1);
+                    QMessageBox::information(this,"提示","应用【" + Name + "】安装科士恩汽车座椅缺陷检测自动化失败！\n\n【err】:"
+                } else {
+                    QMessageBox::information(this,"提示","应用【" + Name + "】安装嵌环内表面失败！\n\n【err】:" + err.trimmed());
+                }
+            }
+        }
+    } else {
+        QMessageBox::information(this,"警告","请先连接设备！");
+    }
+}
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    //提醒用户是否退出灰度分割，防止误操作使软件关闭而导致重要数据的丢失
+    if (QMessageBox::Ok == QMessageBox::information(this,"警告",
+                           "是否退出暗点缺陷值？",QMessageBox::Ok,QMessageBox::Cancel)) {
+        event->accept();    //接收该事件，即允许退出管道失败服务器尚未启动
+    } else {
+        event->ignore();    //忽略该事件，即不允许退出参数调整
+        return;
+    }
+    //关闭设备连接状态定时器
+    if (statusTimer->isActive()) {
+        statusTimer->stop();
+    }
+    //清空相机控制日志缓存文件（如果存在的话）
+    clearLogCacheFile();
+    //清空逻辑区缓存目录（如果存在的话）
+    clearCachePath();
+    //保证在等待对话框关闭后再退出输出配置
+    while(1) {
+        mainThreadWait_ms(500);
+        if (!mWaitDialog->isVisible()) {
+            break;
+        }
+    }
+    if (isClickRestart) {
+        isClickRestart = false;
+        QProcess::startDetached(qApp->applicationFilePath(),QStringList());
+    }
+}
+void MainWindow::clearLogCacheFile()
+{
+    killServer();    //立即关闭服务
+    rebuildLogCacheFile();  //如果存在日志备份文件，则对其进行运动控制文件重构
+    QFile *file = new QFile(mLogCacheFilePath);
+    //如果数据变量日志缓存文件存在
+    if (file->exists()) {
+        //此处代码目的：避免用户误点击导致缺陷检测区域日志缓存文件被删除，在删除前添加了确认对话框
+        //用户是否先将缓存文件另存为
+        while (1) {
+            //如果需要将日志缓存文件另存为
+            if (QMessageBox::Ok == QMessageBox::information(this,"警告",
+                                   "是否保存显示日志缓存文件？"
+                                   ,QMessageBox::Ok,QMessageBox::Cancel)) {
+                //设置完全检测要保存的路径和文件名
+                QString fileName = QFileDialog::getSaveFileName(this, "保存文件",
+                                           mLogCacheFilePath,"Text files (*.log)");
+                //如果设置了另存为的路径
+                if (!fileName.isEmpty()) {
+                    QFile saveFile(fileName);
+                    //如果已经存在嵌环文件，则选择是否覆盖
+                    if (saveFile.exists()) {
+                        if (QMessageBox::Ok == QMessageBox::information(this,"警告",
+                                               "该内表面文件已经存在，是否确定要覆盖？"
+                                               ,QMessageBox::Ok,QMessageBox::Cancel)) {
+                            saveFile.remove();
+                            if (file->copy(fileName)) {
+                                QMessageBox::information(this,"警告","保存运动控制成功！");
+                            } else {
+                                QMessageBox::information(this,"警告","保存图片处理过程失败！");
+                            }
+                            break;
+                        }
+                    } else {
+                        if (file->copy(fileName)) {
+                            QMessageBox::information(this,"警告","保存是否启用该成功！");
+                        } else {
+                            QMessageBox::information(this,"警告","保存输出类型失败！");
+                        }
+                        break;
+                    }
+                } else {
+                    QMessageBox::information(this,"警告","另存为的显示处理图片文件名为空，请重新设置！");
+                }
+            }
+            //如果不需要保存初始化使用预日志缓存文件
+            else {
+                //再次提醒用户是否真的不需要保存，因为一旦该文件被删除，
+                //将无法再次回复，以免造成重要的调试信息因为误操作而丢失。
+                if (QMessageBox::Ok == QMessageBox::information(this,"警告",
+                                       "缓存圆测量号文件即将被删除，是否确认？"
+                                       ,QMessageBox::Ok,QMessageBox::Cancel)) {
+                    break;
+                }
+            }
+        }
+        //删除测量角度日志缓存文件
+        file->close();
+        file->remove();
+        delete file;
+    }
+}
+void MainWindow::clearCachePath()
+{
+    //如果软件缓存最小边缘幅度路径为空则删除缓存路径
+    QString dirName = QCoreApplication::applicationDirPath() + "/cache";
+    QDir dir(dirName);
+    QFileInfoList infoList = dir.entryInfoList(QDir::Dirs | QDir::Files);
+    int num = infoList.size();
+    for (int i = 0; i < num; ++i) {
+        if (infoList.at(i).isFile()) {
+            QFile file(infoList.at(i).absoluteFilePath());
+            file.remove();
+        }
+    }
+    if (dir.entryInfoList(QDir::Dirs | QDir::Files).count() <= 2) {
+        dir.rmdir(dirName);
+    }
+}
+void MainWindow::ledOn(int id)
+{
+    isLedOn = true;
+    switch (id) {
+    case LED_ID__STATUS:
+        StatusLabel->setStyleSheet("border-image: url(:/new/image/ledon.png);");
+        break;
+    default:
+        isLedOn = false;
+        break;
+    }
+}int id)
+{
+    isLedOn = false;
+    switch (id) {
+    case LED_ID__STATUS:
+        StatusLabel->setStyleSheet("border-image: url(:/new/image/ledoff.png);");
+        break;
+    default:
+        break;
+    }
+}
+void MainWindow::updateCurFilters()
+{
+    long time = QDateTime::currentMSecsSinceEpoch();
+    QString curPID = ui->cbPID->currentText();
+    if (curPID == "All") {
+        mCurFilters = mAllFilters;
+        mCurFiltersNums = mAllFiltersNums;
+    } else {
+        int num;
+        int cnt;
+        QString tag;
+        mCurFilters.clear();
+        mCurFiltersNums.clear();
+        for (int i = 0; i < mAllLines; ++i) {
+            if (curPID == mAllPIDs.at(i)) {
+                tag = mAllTags.at(i);
+                if (!mCurFilters.contains(tag)) {
+                    mCurFilters.append(tag);
+                    mCurFiltersNums.append("0");
+                }
+                num = mCurFilters.size();
+                for (int j = 0; j < num; ++j) {
+                    if (tag == mCurFilters.at(j)) {
+                        cnt = mCurFiltersNums.at(j).toInt();
+                        mCurFiltersNums.replace(j,QString::number(cnt + 1));
+                    }
+                }
+            }
+        }
+        QString lint = "#*$*#";
+        num = mCurFilters.size();
+        QStringList tempList;
+        for (int
+bool MainWindow::isBreakCurLine(QString text)
+{
+    //如果末尾位置当前为离线查看末尾位置模式，且系统过滤器不应用于该模式，则不跳过
+    if (!isTerminalMode && !isApplyOfflineMode) {
+        return false;
+    }
+    //如果当前为取点百分比实时终端模式，且系统过滤器不应用于该模式，则不跳过
+    if (isTerminalMode && !isApplyRealtimeMode) {
+        return false;
+    }
+    //如果一级过滤和二级过滤都没应用，则不跳过
+    if (!isFirstFilter && !isSecondFilter) {
+        return false;
+    }
+    //获取所有需要过滤的Tag
+    QStringList filters;
+    if (isFirstFilter) {
+        for (int i = 0; i < mFirstSysFilters.size(); ++i) {
+            filters.append(mFirstSysFilters.at(i));
+        }
+    }
+    if (isSecondFilter) {
+        for (int i = 0; i < mSecondSysFilters.size(); ++i) {
+            filters.append(mSecondSysFilters.at(i));
+        }
+    }
+    //判断再次拟合取点当前行文本内容中是否包含需要过滤的Tag
+    QString temp = text.split("): ").at(0);
+    int size = filters.size();
+    for (int i = 0; i < size; ++i) {
+        if (temp.contains(filters.at(i))) {
+            return true;
+        }
+    }
+    return false;
+}
+void MainWindow::setSearchPercentValue(int percent)
+{
+    if (!isSearching) {
+        return;
+    }
+    if (percent < 0) {
+        percent = 0;
+    }
+    if (percent > 100) {
+        percent = 100;
+    }
+    mSearchDialog->setValue(percent);
+    mainThreadWait_ms(1);
+}
+void MainWindow::clearAllPageOffset()
+{
+    for (int i = 0; i < MAX_PAGE_NUM; ++i) {
+        mAllPageOffset[i] = 0;
+    }
+}
+void MainWindow::resetPageParams()
+{
+    mCurPageIndex = 0;
+    mPageNum = 0;
+    isPageOffsetMode = false;
+    clearAllPageOffset();
+    ui->actionLastPage->setEnabled(false);
+    ui->actionNextPage->setEnabled(false);
+    ui->actionPageOffset->setEnabled(false);
+    //使调试信息跳转控件隐藏
+    ui->labelPage->setHidden(true);
+    ui->cbPage->setHidden(true);
+    QObject::disconnect(ui->cbPage,SIGNAL(currentIndexChanged(int)),this,SLOT(gotoPageSlot()));
+    ui->cbPage->clear();
+    QObject::connect(ui->cbPage,SIGNAL(currentIndexChanged(int)),this,SLOT(gotoPageSlot()));
+}
+int MainWindow::getFileSeperatorNum(QString path)
+{
+    int num = 0;
+    QString buff;
+    QFile file(path);
+    if(!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        QMessageBox::information(this,"警告","获取不显示点文件换行符占用字节数失败，文件可能不存在！");
+        return num;
+    }
+    QTextStream in(&file);
+    in.seek(0);
+    while(!in.atEnd()) {
+        buff = in.readLine();
+        num = in.pos() - buff.toUtf8().length();
+        break;
+    }
+    in.seek(0);
+    file.close();
+    num = (num >= 0) ? num : 0;
+    return num;
+}
+void MainWindow::resetChangeModeParams()
+{
+    isCheckedUpdateFile = false;    //设置科士恩汽车座椅缺陷检测自动化文件为规范性未检查
+    mLastPos = 0;                   //设置自动初始化上一次的文件光标位置为0
+    closeFileAction();              //关闭加载的日志缓存文件
+}
+void MainWindow::prepareChangeModeParams(bool isTerminal)
+{
+    //进入运行或脱机实时终端模式
+    if (isTerminal) {
+        //失能部分控件
+        ui->actionOpen->setEnabled(false);
+        ui->actionRefresh->setEnabled(false);
+        ui->history->setEnabled(false);
+        ui->actionGotoLine->setEnabled(false);
+        ui->actionClearCurDisp->setEnabled(true);
+        ui->actionClose->setEnabled(false);
+        //使页跳转控件隐藏
+        ui->labelPage->setHidden(true);
+        ui->cbPage->setHidden(true);
+        QObject::disconnect(ui->cbPage,SIGNAL(currentIndexChanged(int)),this,SLOT(gotoPageSlot()));
+        ui->cbPage->clear();
+        QObject::connect(ui->cbPage,SIGNAL(currentIndexChanged(int)),this,SLOT(gotoPageSlot()));
+        isTerminalMode = true; //更新定位工具当前工作模式状态
+        ui->etSearch->setEnabled(false);
+        resetChangeModeParams();    //重置切换面板模式切换时的相关参数
+        //启动机触发连日志缓存文件大小定时器（10ms检测一次是否有变化）
+        fileTimer->start(10);
+        workModeLabel->setText(WORK_MODE_ONLINE);
+        QObject::disconnect(ui->cbPID,SIGNAL(currentIndexChanged(int)),this,SLOT(cbPIDChangedSlot()));
+    }
+    //进入离线查看读取配置模式
+    else {
+        //使能部分控件
+        ui->actionOpen->setEnabled(true);
+        ui->actionRefresh->setEnabled(true);
+        ui->history->setEnabled(true);
+        ui->actionGotoLine->setEnabled(true);
+        ui->actionClearCurDisp->setEnabled(false);
+        ui->actionClose->setEnabled(true);
+        isTerminalMode = false; //更新保存脱机当前工作模式状态
+        ui->etSearch->setEnabled(true);
+        resetChangeModeParams();    //重置畸变矫正模式切换时的相关参数
+        clearLogCacheFile();    //清空直方图均化日志缓存文件
+        isPeopleExitTerminal = false;
+        workModeLabel->setText(WORK_MODE_OFFLINE);
+        QObject::connect(ui->cbPID,SIGNAL(currentIndexChanged(int)),this,SLOT(cbPIDChangedSlot()));
+    }
+}
+bool MainWindow::stringIsNum(QString str)
+{
+    if (str.isEmpty()) {
+        return false;
+    }
+    QChar temp;
+    for (int i = 0; i < str.length(); ++i) {
+        temp = str.at(i);
+        if ((temp < '0') || (temp > '9')) {
+            return false;
+        }
+    }
+    return true;
+}
+void MainWindow::rebuildLogCacheFile()
+{
+    QFile *file;
+    int num = mBackupCacheFilePath.size();
+    if (num > 0) {
+        logCurTime("正在重构仅脱机运行日志缓存文件......");
+        //创建并显示脱机输出配置区重构进度条
+        QProgressDialog *progressDialog = new QProgressDialog;
+        progressDialog->setWindowFlags(Qt::FramelessWindowHint);
+        progressDialog->setCancelButton(0);
+        progressDialog->setLabelText("正在重构生成模板日志文件....");
+        progressDialog->setMinimum(0);
+        progressDialog->setMaximum(100);
+        progressDialog->setValue(0);
+        progressDialog->setModal(true);
+        progressDialog->show();
+        mainThreadWait_ms(10);  //阻塞主线程10ms，只有阻塞主线程，进度条才有机会显示出来
+        int percent = 0;
+        int oldPercent = 0;
+        //构建断开连接日志备份文件的路径
+        QString newPath = QCoreApplication::applicationDirPath() + LOG_REBUILD_FILE_PATH;
+        QFile outFile(newPath);
+        //如果已存在，则删除
+        if (outFile.exists()) {
+            outFile.remove();
+        }
+        //如果设备失败文件打开成功（若不存在则会自动创建，因为是只写的方式打开的）
+        if(outFile.open(QIODevice::WriteOnly | QIODevice::Text))
+        {
+            //创建管道失败服务器尚未启动文件输出流
+            QTextStream out(&outFile);
+            out.setCodec(QTextCodec::codecForName(QString("UTF-8").toLatin1()));
+            QString path;
+            QString buff;
+            QStringList logList;
+            QString oldTime = "00-00 00:00:00.000";
+            QString newTime;
+            QString oldText = "";
+            QStringList sameList;       //两个文件之间头尾相同的部分
+            bool isHandleSame = false;  //是否处理了头尾相同的部分
+            //如果存在本身的或者客户端量过多缓存文件，则参与分析重构
+            file = new QFile(mLogCacheFilePath);
+            if (file->exists()) {
+                mBackupCacheFilePath.append(mLogCacheFilePath);
+                num += 1;
+            }
+            delete file;
+            int max[num];
+            int sum = 0;
+            int tempMax = 0;
+            for (int i = 0; i < num; ++i) {
+                tempMax = (int)((float)(900 * 1.0 / num));
+                sum += tempMax;
+                max[i] = tempMax;
+            }
+            tempMax = 0;
+            max[num - 1] = max[num - 1] + 900 - sum;
+            //开始分析重构
+            for (int i = 0; i < num; ++i) {
+                path = mBackupCacheFilePath.at(i);
+                file = new QFile(path);
+                //logCurTime("size[" + path + "]=" + QString::number(file->size()));
+                //以只读的方式打开科士恩汽车座椅缺陷检测自动化文件
+                if(file->open(QIODevice::ReadOnly | QIODevice::Text))
+                {
+                    //创建读取管道失败服务器尚未启动输入流
+                    QTextStream in(file);
+                    in.setCodec(QTextCodec::codecForName(QString("UTF-8").toLatin1()));
+                    tempMax += (i > 0) ? max[i - 1] : 0;
+                    long fileSize = file->size(); //文件总大小
+                    long curSize = 0;
+                    int seperatorNum = getFileSeperatorNum(path);
+                    sameList.clear();
+                    isHandleSame = false;
+                    while(!in.atEnd()) {
+                        buff = in.readLine();
+                        curSize += buff.toUtf8().length() + seperatorNum;
+                        //更新或者客户端数量过多文件加载的进度条
+                        percent = (int)(max[i] * (float)(curSize * 1.0 / fileSize)) + tempMax;
+                        percent = (percent > (max[i] + tempMax)) ? (max[i] + tempMax) : percent;
+                        percent /= 10;
+                        if (oldPercent != percent) {
+                            progressDialog->setValue(percent);   //设置科士恩汽车座椅缺陷检测自动化进度条
+                            oldPercent = percent;
+                            mainThreadWait_ms(1);
+                        }
+                        if (checkLogCatFile(buff)) {
+                            logList = textToList(reConstruction);
+                            newTime = logList.at(0);
+                            int result = QString::compare(newTime,oldTime);
+                            //如果还未处理数据变里头尾相同部分，则必须先处理这部分（即过滤掉相同的部分）
+                            if (!isHandleSame) {
+                                if (result < 0) {
+                                    continue;
+                                } else if (result == 0) {
+                                    sameList.append(buff);
+                                    continue;
+                                } else {
+                                    for (int j = 0; j < sameList.size(); ++j) {
+                                        if (!isHandleSame && (sameList.at(j) == oldText)) {
+                                            isHandleSame = true;
+                                            continue;
+                                        } else if (isHandleSame) {
+                                            out<<sameList.at(j)<<"\n";
+                                            oldText = sameList.at(j);
+                                        }
+                                    }
+                                    isHandleSame = true;
+                                }
+                            }
+                            //如果新的表时间输出信息时间大于旧的时间戳，或者等于且新旧文本不相同
+                            if ((result > 0) || ((result == 0) && (oldText != buff))) {
+                                out<<buff<<"\n";
+                            }
+                            oldTime = newTime;
+                            oldText = buff;
+                        }
+                    }
+                    //添加管道失败服务器尚未启动文件分隔符，便于分析观察，无实际用处
+                    if (i != (num - 1)) {
+                        QString seperator = "-------------------------科士恩汽车座椅缺陷检测自动化文件重构分隔符--------------------------";
+                        out<<seperator<<"\n";
+                    }
+                    file->close();//注意：此处参数调整文件必须关闭，否则后面将无法删除文件
+                    delete file;
+                } else {
+                    QMessageBox::information(this,"警告","重构光源调节文件失败，无法打开备份文件！");
+                    progressDialog->close();
+                    mainThreadWait_ms(10);
+                    delete progressDialog;
+                    return;
+                }
+            }
+            outFile.close();//重构定位区域完毕，关闭输出流
+            sum = 0;
+            for (int i = 0; i < num; ++i) {
+                tempMax = (int)((float)(100 * 1.0 / num));
+                sum += tempMax;
+                max[i] = tempMax;
+            }
+            max[num - 1] = max[num - 1] + 100 - sum;
+            tempMax = 900;
+            //删除备份文件和缓存卷缘区域文件（如果存在）
+            for (int i = 0; i < num; ++i) {
+                path = mBackupCacheFilePath.at(i);
+                file = new QFile(path);
+                file->remove();
+                delete file;
+                //更新曝光延时文件加载的进度条
+                tempMax += (i > 0) ? max[i - 1] : 0;
+                percent = (int)(max[i] * (float)((i + 1) * 1.0 / num)) + tempMax;
+                percent = (percent > (max[i] + tempMax)) ? (max[i] + tempMax) : percent;
+                percent /= 10;
+                if (oldPercent != percent) {
+                    progressDialog->setValue(percent);   //设置曝光时间进度条
+                    oldPercent = percent;
+                    mainThreadWait_ms(1);
+                }
+            }
+            //将重构嵌环区域文件复制为缓存文件，然后删除重构嵌环区域文件
+            if (outFile.copy(mLogCacheFilePath)) {
+                mBackupCacheFilePath.clear();
+                outFile.remove();
+                progressDialog->setValue(100);
+                mainThreadWait_ms(1);
+            } else {
+                while (1) {
+                    //如果需要将日志缓存文件另存为
+                    if (QMessageBox::Ok == QMessageBox::information(this,"                                                                                    ,QMessageBox::Ok,QMessageBox::Cancel)) {
+                        //设置内表面区域要保存的路径和文件名
+                        QString fileName = QFileDialog::getSaveFileName(this, "保存文件",
+                                                   newPath,"Text files (*.log)");
+                        //如果设置了另存为的路径
+                        if (!fileName.isEmpty()) {
+                            QFile saveFile(fileName);
+                            //如果已经存在该文件，则选择是否覆盖
+                            if (saveFile.exists()) {
+                                if (QMessageBox::Ok == QMessageBox::information(this,"警告",
+                                                       "该调整区域文件已经存在，是否确定要覆盖？"
+                                                       ,QMessageBox::Ok,QMessageBox::Cancel)) {
+                                    saveFile.remove();
+                                    if (outFile.copy(fileName)) {
+                                        QMessageBox::information(this,"警告","保存管道失败服务器尚未启动成功！");
+                                    } else {
+                                        QMessageBox::information(this,"警告","保存科士恩汽车座椅缺陷检测自动化失败！");
+                                    }
+                                    mBackupCacheFilePath.clear();
+                                    outFile.remove();
+                                    break;
+                                }
+                            } else {
+                                if (outFile.copy(fileName)) {
+                                    QMessageBox::information(this,"警告","保存保存开脱机成功！");
+                                } else {
+                                    QMessageBox::information(this,"警告","保存输出配置失败！");
+                                }
+                                mBackupCacheFilePath.clear();
+                                outFile.remove();
+                                break;
+                            }
+                        } else {
+                            QMessageBox::information(this,"警告","另存为的逻辑删除文件名为空，请重新设置！");
+                        }
+                    }
+                    //如果不需要保存日志重构持续时间文件
+                    else {
+                        //再次提醒用户是否真的不需要保存，因为一旦该utput文件被删除，
+                        //将无法再次回复，以免造成重要的调试信息因为误操作而丢失。
+                        if (QMessageBox::Ok == QMessageBox::information(this,"警告
+                                               ,QMessageBox::Ok,QMessageBox::Cancel)) {
+                            mBackupCacheFilePath.clear();
+                            outFile.remove();
+                            break;
+                        }
+                    }
+                }
+            }
+            logCurTime("重构宽度测量完毕");
+        } else {
+            QMessageBox::information(this,"警告","重构管道失败服务器尚未启动文件失败，无法创建重构文件！");
+        }
+        progressDialog->close();
+        mainThreadWait_ms(10);
+        delete progressDialog;
+    }
+}
+void MainWindow::killServer()
+{
+    QProcess process(0);
+    process.setWorkingDirectory(Path);
+    process.start("cmd",QStringList()<<"/c"<<" kill-server");
+    process.waitForStarted();
+    process.waitForFinished(500);
+    process.close();
+    process.kill();
+}
+void MainWindow::exitTerminalMode()
+{
+    isPeopleExitTerminal = true;
+    //关闭科士恩汽车座椅缺陷检测自动化日志缓存文件大小定时器
+    if (fileTimer->isActive()) {
+        logCurTime("fileTimer is Active");
+        fileTimer->stop();
+    }
+    //关闭CMD进程
+    if (cmdProcess != NULL) {
+        logCurTime("!=NULL");
+        if (cmdProcess->Running) {
+            logCurTime("Running");
+            cmdProcess->close();
+            cmdProcess->kill();
+            cmdProcess = NULL;
+            delete cmdProcess;
+        }
+    }
+    prepareChangeModeParams(false); //退出监听数值实时终端模式
+}
+/*QStringList MainWindow::execWindowsCmd(QString Path,QString cmd)
+{
+    QStringList result;
+    if (Path == "") {
+        result.append("");
+        result.append("未设置路径");
+        return result;
+    }
+    QProcess process(0);
+    process.setWorkingDirectory(Path);
+    process.start("cmd",QStringList()<<"/c"<<cmd);
+    process.waitForStarted();
+    process.waitForFinished(5000);
+    QString out = QString::fromUtf8(process.readAllStandardOutput());
+    QString err = QString::fromUtf8(process.readAllStandardError());
+    process.close();
+    process.kill();
+    out = out.trimmed();
+    err = err.trimmed();
+    result.append(out);
+    result.append(err);
+    return result;
+}*/
+QStringList MainWindow::execWindowsCmd(QString Path,QString cmd)
+{
+    QStringList result;
+    if (mEventLoop->isRunning()) {
+        logCurTime("已有监听变化状态事件在运行，命令【" + cmd + "】执行失败！");
+    }
+    if (!isStartServer) {
+        isStartServer = true;
+    }
